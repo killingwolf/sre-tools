@@ -1,14 +1,14 @@
 # Claude 开发环境初始化
 
-在新机器上一键安装 Claude Code 的开发依赖：**fnm**（Node 版本管理）、**uv**（Python 项目管理）、最新 **LTS Node.js**，通过 npm 全局安装 **Claude Code**，并把默认权限模式写入用户级 `~/.claude/settings.json`（默认 `bypassPermissions`，工具操作不再询问确认）。全部采用官方安装脚本，脚本幂等，可重复执行。
+在新机器上一键安装 Claude Code 的开发依赖：**fnm**（Node 版本管理）、**uv**（Python 项目管理）、最新 **LTS Node.js**（发行包默认走阿里云镜像），通过 npm 全局安装 **Claude Code** 与 **teamai-cli**，并把默认权限模式写入用户级 `~/.claude/settings.json`（默认 `bypassPermissions`，工具操作不再询问确认）。全部采用官方安装脚本，脚本幂等，可重复执行。
 
 ```
 ./claude-env.sh setup
       │
       ├─ 1. fnm     node 版本管理器   → ~/.local/share/fnm
       ├─ 2. uv      python 项目管理器 → ~/.local/bin
-      ├─ 3. node    fnm install --lts（最新 LTS，满足 Claude Code 的 Node ≥ 22 要求）
-      ├─ 4. claude  npm install -g @anthropic-ai/claude-code
+      ├─ 3. node    fnm install --lts（最新 LTS，默认从阿里云镜像下载）
+      ├─ 4. npm     全局工具：@anthropic-ai/claude-code、teamai-cli
       └─ 5. 配置    ~/.claude/settings.json → permissions.defaultMode: bypassPermissions
 ```
 
@@ -37,6 +37,7 @@ fnm --version
 node --version      # 应为最新 LTS
 uv --version
 claude --version
+teamai --version
 cat ~/.claude/settings.json   # permissions.defaultMode 应为 bypassPermissions
 claude              # 首次运行，按浏览器提示登录
 ```
@@ -57,7 +58,8 @@ claude              # 首次运行，按浏览器提示登录
 |------|--------|------|
 | `FNM_INSTALL_URL` | `https://fnm.vercel.app/install` | fnm 官方安装脚本地址 |
 | `UV_INSTALL_URL` | `https://astral.sh/uv/install.sh` | uv 官方安装脚本地址 |
-| `NPM_TOOLS` | `@anthropic-ai/claude-code` | npm 全局工具列表，按需追加（如 `pnpm`）；可带版本号固定（如 `pnpm@9.1.0`） |
+| `FNM_NODE_DIST_MIRROR` | `https://mirrors.aliyun.com/nodejs-release/` | node 发行包下载镜像（fnm 原生支持的环境变量），默认阿里云；设为 `https://nodejs.org/dist` 回官方源 |
+| `NPM_TOOLS` | `@anthropic-ai/claude-code`、`teamai-cli` | npm 全局工具列表，按需追加（如 `pnpm`）；可带版本号固定（如 `pnpm@9.1.0`） |
 | `CLAUDE_SETTINGS_FILE` | `~/.claude/settings.json` | Claude Code 用户级配置文件路径 |
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | 默认权限模式，可选 `default` / `acceptEdits` / `plan` / `bypassPermissions` / `auto` |
 | `RETRY_MAX` | `3` | 网络操作最多尝试次数（含首次） |
@@ -65,11 +67,10 @@ claude              # 首次运行，按浏览器提示登录
 
 ### 网络受限环境（镜像加速）
 
-所有网络操作均带指数退避重试；如仍不稳定，可用环境变量指定国内镜像后再执行 `setup`：
+所有网络操作均带指数退避重试；node 发行包已默认走阿里云镜像（`FNM_NODE_DIST_MIRROR`）。如仍不稳定，可用环境变量指定镜像后再执行 `setup`：
 
 ```bash
-export NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"        # npm 包
-export FNM_NODE_DIST_MIRROR="https://npmmirror.com/mirrors/node"   # node 发行包（fnm 原生支持）
+export NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"        # npm 包（claude-code / teamai-cli）
 export FNM_INSTALL_URL="<内网镜像的 fnm 安装脚本地址>"               # 安装脚本本身
 export UV_INSTALL_URL="<内网镜像的 uv 安装脚本地址>"
 ./claude-env.sh setup

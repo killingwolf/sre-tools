@@ -18,8 +18,11 @@ trap 'echo "[!] 脚本在第 $LINENO 行失败：$BASH_COMMAND"' ERR
 # ─── 配置区（均支持环境变量覆盖，便于切换镜像 / 调整重试参数） ───
 FNM_INSTALL_URL="${FNM_INSTALL_URL:-https://fnm.vercel.app/install}"    # fnm 官方安装脚本
 UV_INSTALL_URL="${UV_INSTALL_URL:-https://astral.sh/uv/install.sh}"     # uv 官方安装脚本
+# node 发行包下载镜像（fnm 原生支持的环境变量），默认阿里云；覆盖为 https://nodejs.org/dist 可回官方源
+export FNM_NODE_DIST_MIRROR="${FNM_NODE_DIST_MIRROR:-https://mirrors.aliyun.com/nodejs-release/}"
 NPM_TOOLS=(                                         # npm 全局工具，按需追加；可带版本号（如 pnpm@9.1.0）
     "@anthropic-ai/claude-code"
+    "teamai-cli"
 )
 CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"  # Claude Code 用户级配置（bypassPermissions 仅在用户级/托管设置生效）
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"   # 默认权限模式：default / acceptEdits / plan / bypassPermissions / auto
