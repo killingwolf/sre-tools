@@ -69,5 +69,5 @@ claude              # 首次运行，按浏览器提示登录
 4. Claude Code 登录需要 Pro / Max / Team / Enterprise / Console 账号，免费版 claude.ai 账号不含 Claude Code 访问权限。
 5. **bypassPermissions 意味着 Claude Code 执行任何工具操作（Bash 命令、文件读写等）都不再询问确认**，请仅在可信机器 / 隔离环境中启用；要收紧时把 `CLAUDE_PERMISSION_MODE` 改为 `default` / `acceptEdits` / `plan` 后执行 `./claude-env.sh config`。
 6. 官方限制（Claude Code v2.1.257+）：`bypassPermissions` 只在**用户级** `~/.claude/settings.json` 或托管设置中生效，项目级 `.claude/settings.json` 会被忽略——所以脚本写用户级文件；另外 root 用户运行 bypass 权限模式会被 Claude Code 限制，本脚本面向非 root 用户。
-7. `~/.claude/settings.json` 已存在时按 JSON **合并**（保留其他键，格式化为两空格缩进）；解析失败会报错退出且不修改原文件。
+7. `~/.claude/settings.json` 已存在时按 JSON **合并**（保留其他键，格式化为两空格缩进；空文件视为 `{}`）；写入采用临时文件 + 原子改名。顶层不是 JSON 对象、`permissions` 字段类型非法或解析失败时，脚本报错退出且**不修改原文件**。
 8. 切换 / 管理 Node 版本：`fnm install <版本>`、`fnm default <版本>`、`fnm use <版本>`，详见 [fnm 文档](https://github.com/Schniz/fnm)。

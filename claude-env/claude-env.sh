@@ -199,14 +199,23 @@ EOF
         const fs = require("fs");
         const file = process.argv[1];
         const mode = process.argv[2];
-        const s = JSON.parse(fs.readFileSync(file, "utf8"));
+        const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+        const raw = fs.readFileSync(file, "utf8");
+        const s = raw.trim() === "" ? {} : JSON.parse(raw);   // 空文件视为 {}
+        if (!isObj(s)) { console.error("顶层必须是 JSON 对象"); process.exit(1); }
+        if (s.permissions !== undefined && s.permissions !== null && !isObj(s.permissions)) {
+            console.error("permissions 字段必须是 JSON 对象");
+            process.exit(1);
+        }
         s.permissions = s.permissions || {};
         if (s.permissions.defaultMode === mode) { console.log("skip"); process.exit(0); }
         s.permissions.defaultMode = mode;
-        fs.writeFileSync(file, JSON.stringify(s, null, 2) + "\n");
+        // 临时文件 + 原子改名，避免写入中断损坏原文件
+        fs.writeFileSync(file + ".tmp", JSON.stringify(s, null, 2) + "\n");
+        fs.renameSync(file + ".tmp", file);
         console.log("updated");
     ' "$CLAUDE_SETTINGS_FILE" "$CLAUDE_PERMISSION_MODE"); then
-        echo "[!] $CLAUDE_SETTINGS_FILE 解析失败（须为严格 JSON，不能有注释/尾逗号），脚本未做修改，请手动修复后重试"
+        echo "[!] $CLAUDE_SETTINGS_FILE 解析或写入失败（详见上方 node 错误输出；JSON 须为严格格式，顶层须为对象），原文件未做修改，请修复后重试"
         exit 1
     fi
 
@@ -247,8 +256,9 @@ show() {
     fi
     if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
         local mode
-        mode=$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log((s.permissions&&s.permissions.defaultMode)||"")' "$CLAUDE_SETTINGS_FILE" 2>/dev/null || true)
-        if [ -n "$mode" ]; then
+        if ! mode=$(node -e 'const raw=require("fs").readFileSync(process.argv[1],"utf8");const s=raw.trim()===""?{}:JSON.parse(raw);console.log((s.permissions&&s.permissions.defaultMode)||"")' "$CLAUDE_SETTINGS_FILE" 2>/dev/null); then
+            echo "  权限模式: 无法读取（$CLAUDE_SETTINGS_FILE 非法或缺少 node）"
+        elif [ -n "$mode" ]; then
             echo "  权限模式: $mode  ($CLAUDE_SETTINGS_FILE)"
         else
             echo "  权限模式: 未设置 defaultMode  ($CLAUDE_SETTINGS_FILE)"
