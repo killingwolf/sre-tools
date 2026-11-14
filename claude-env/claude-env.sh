@@ -6,17 +6,46 @@
 # 使用方式：
 #   初始化：./claude-env.sh setup    # 幂等，可重复执行，已装组件自动跳过
 #   状态：  ./claude-env.sh show     # 查看各组件版本 / 安装状态
+#
+#   网络重试与镜像均可用环境变量覆盖（RETRY_MAX / RETRY_DELAY / FNM_INSTALL_URL /
+#   UV_INSTALL_URL / NPM_CONFIG_REGISTRY / FNM_NODE_DIST_MIRROR 等），详见 README
 
 set -e
+set -E    # 让 ERR trap 在函数内部也生效
+# 未捕获失败时打印行号与命令，便于无人值守运行排障
+trap 'echo "[!] 脚本在第 $LINENO 行失败：$BASH_COMMAND"' ERR
 
-# ─── 配置区 ───
-FNM_INSTALL_URL="https://fnm.vercel.app/install"    # fnm 官方安装脚本
-UV_INSTALL_URL="https://astral.sh/uv/install.sh"    # uv 官方安装脚本
-NPM_TOOLS=(                                         # npm 全局工具，按需追加
+# ─── 配置区（均支持环境变量覆盖，便于切换镜像 / 调整重试参数） ───
+FNM_INSTALL_URL="${FNM_INSTALL_URL:-https://fnm.vercel.app/install}"    # fnm 官方安装脚本
+UV_INSTALL_URL="${UV_INSTALL_URL:-https://astral.sh/uv/install.sh}"     # uv 官方安装脚本
+NPM_TOOLS=(                                         # npm 全局工具，按需追加；可带版本号（如 pnpm@9.1.0）
     "@anthropic-ai/claude-code"
 )
-CLAUDE_SETTINGS_FILE="$HOME/.claude/settings.json"  # Claude Code 用户级配置（bypassPermissions 仅在用户级/托管设置生效）
-CLAUDE_PERMISSION_MODE="bypassPermissions"          # 默认权限模式：default / acceptEdits / plan / bypassPermissions / auto
+CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"  # Claude Code 用户级配置（bypassPermissions 仅在用户级/托管设置生效）
+CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"   # 默认权限模式：default / acceptEdits / plan / bypassPermissions / auto
+RETRY_MAX="${RETRY_MAX:-3}"                         # 网络操作最多尝试次数（含首次）
+RETRY_DELAY="${RETRY_DELAY:-5}"                     # 失败后首次退避秒数，逐次翻倍
+
+# ─── 失败重试：指数退避，所有网络操作都经过这里 ───
+retry() {
+    local attempt=1
+    local delay="$RETRY_DELAY"
+    until "$@"; do
+        if [ "$attempt" -ge "$RETRY_MAX" ]; then
+            echo "[!] 已尝试 $attempt 次仍失败：$*"
+            return 1
+        fi
+        echo "[!] 执行失败，${delay}s 后重试（第 $attempt/$RETRY_MAX 次）：$*"
+        sleep "$delay"
+        attempt=$((attempt + 1))
+        delay=$((delay * 2))
+    done
+}
+
+# ─── 下载文件（curl 自带超时+底层重试；下载与执行分离，避免管道直跑半截脚本） ───
+download() {  # download <URL> <输出文件>
+    curl -fsSL --connect-timeout 10 --retry 3 --retry-delay 2 "$1" -o "$2"
+}
 
 # ─── 加载本地安装目录与 fnm 环境（让当前脚本进程立即可用） ───
 load_fnm_env() {
@@ -64,12 +93,13 @@ ensure_deps() {
     fi
 
     if command -v apt-get &>/dev/null; then
-        $sudo_cmd apt-get update -y
-        $sudo_cmd apt-get install -y "${missing[@]}"
+        # update 失败常见于个别第三方源失效，降级为警告，install 仍会用本地缓存重试
+        retry $sudo_cmd apt-get update -y || echo "[!] apt-get update 失败，继续尝试安装依赖"
+        retry $sudo_cmd apt-get install -y "${missing[@]}"
     elif command -v dnf &>/dev/null; then
-        $sudo_cmd dnf install -y "${missing[@]}"
+        retry $sudo_cmd dnf install -y "${missing[@]}"
     elif command -v yum &>/dev/null; then
-        $sudo_cmd yum install -y "${missing[@]}"
+        retry $sudo_cmd yum install -y "${missing[@]}"
     else
         echo "[!] 未找到支持的包管理器（apt-get/dnf/yum），请手动安装：${missing[*]}"
         exit 1
@@ -96,10 +126,20 @@ ensure_fnm() {
     fi
 
     echo "[*] 正在安装 fnm ..."
-    if ! curl -fsSL "$FNM_INSTALL_URL" | bash; then
-        echo "[!] fnm 安装脚本执行失败，请检查上方输出（常见原因：网络不通）"
+    local installer
+    installer=$(mktemp)
+    if ! retry download "$FNM_INSTALL_URL" "$installer"; then
+        echo "[!] 无法下载 fnm 安装脚本：$FNM_INSTALL_URL（请检查网络，或用环境变量 FNM_INSTALL_URL 指定镜像）"
+        rm -f "$installer"
         exit 1
     fi
+    # 安装脚本内部还会从 GitHub 下载 fnm 二进制，因此执行阶段同样需要重试
+    if ! retry bash "$installer"; then
+        echo "[!] fnm 安装失败，请检查上方输出，或参考 https://github.com/Schniz/fnm 手动安装"
+        rm -f "$installer"
+        exit 1
+    fi
+    rm -f "$installer"
     if ! command -v fnm &>/dev/null; then
         echo "[!] 安装后仍未找到 fnm 命令，请检查上方输出，或参考 https://github.com/Schniz/fnm 手动安装"
         exit 1
@@ -115,10 +155,20 @@ ensure_uv() {
     fi
 
     echo "[*] 正在安装 uv ..."
-    if ! curl -LsSf "$UV_INSTALL_URL" | sh; then
-        echo "[!] uv 安装脚本执行失败，请检查上方输出（常见原因：网络不通）"
+    local installer
+    installer=$(mktemp)
+    if ! retry download "$UV_INSTALL_URL" "$installer"; then
+        echo "[!] 无法下载 uv 安装脚本：$UV_INSTALL_URL（请检查网络，或用环境变量 UV_INSTALL_URL 指定镜像）"
+        rm -f "$installer"
         exit 1
     fi
+    # 安装脚本内部还会从 GitHub 下载 uv 二进制，因此执行阶段同样需要重试
+    if ! retry sh "$installer"; then
+        echo "[!] uv 安装失败，请检查上方输出，或参考 https://docs.astral.sh/uv/ 手动安装"
+        rm -f "$installer"
+        exit 1
+    fi
+    rm -f "$installer"
     if ! command -v uv &>/dev/null; then
         echo "[!] 安装后仍未找到 uv 命令（应位于 ~/.local/bin/uv），请检查上方输出，或参考 https://docs.astral.sh/uv/ 手动安装"
         exit 1
@@ -136,7 +186,10 @@ install_node() {
     fi
 
     echo "[*] 正在通过 fnm 安装最新 LTS node ..."
-    fnm install --lts
+    if ! retry fnm install --lts; then
+        echo "[!] node 安装失败（请检查网络；可用环境变量 FNM_NODE_DIST_MIRROR 指定 node 发行包镜像加速）"
+        exit 1
+    fi
     # 重新加载 fnm 环境，让当前脚本进程立即可用 node/npm（首个安装的版本自动成为 default）
     eval "$(fnm env --shell bash)"
     fnm use default &>/dev/null || true
@@ -150,15 +203,24 @@ install_node() {
 
 # ─── 安装 npm 全局工具（Claude Code 等） ───
 install_npm_tools() {
-    local pkg
+    local pkg name spec
     for pkg in "${NPM_TOOLS[@]}"; do
+        # 未带版本号的包默认装 @latest；已带版本号的条目（如 pnpm@9.1.0）按原样固定版本
+        name="${pkg##*/}"
+        case "$name" in
+            *@*) spec="$pkg" ;;
+            *)   spec="$pkg@latest" ;;
+        esac
         if npm ls -g --depth=0 "$pkg" &>/dev/null; then
             echo "[*] $pkg 已安装，跳过"
         else
-            echo "[*] 正在安装 $pkg ..."
+            echo "[*] 正在安装 $spec ..."
             # 不加 sudo：fnm 的 npm 全局目录用户可写，sudo 安装会导致后续自动更新失败
-            npm install -g "$pkg@latest"
-            echo "[+] $pkg 安装成功"
+            if ! retry npm install -g "$spec"; then
+                echo "[!] $spec 安装失败（请检查网络；可用环境变量 NPM_CONFIG_REGISTRY 指定镜像，如 https://registry.npmmirror.com）"
+                exit 1
+            fi
+            echo "[+] $spec 安装成功"
         fi
     done
 }

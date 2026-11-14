@@ -51,15 +51,29 @@ claude              # 首次运行，按浏览器提示登录
 
 ## 配置变量
 
-在脚本顶部 `# ─── 配置区 ───` 中修改：
+脚本顶部 `# ─── 配置区 ───` 中的变量**均支持环境变量覆盖**（无需改脚本即可切镜像 / 调参）：
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `FNM_INSTALL_URL` | `https://fnm.vercel.app/install` | fnm 官方安装脚本地址 |
 | `UV_INSTALL_URL` | `https://astral.sh/uv/install.sh` | uv 官方安装脚本地址 |
-| `NPM_TOOLS` | `@anthropic-ai/claude-code` | npm 全局工具列表，按需追加（如 `pnpm`、`typescript`） |
+| `NPM_TOOLS` | `@anthropic-ai/claude-code` | npm 全局工具列表，按需追加（如 `pnpm`）；可带版本号固定（如 `pnpm@9.1.0`） |
 | `CLAUDE_SETTINGS_FILE` | `~/.claude/settings.json` | Claude Code 用户级配置文件路径 |
 | `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | 默认权限模式，可选 `default` / `acceptEdits` / `plan` / `bypassPermissions` / `auto` |
+| `RETRY_MAX` | `3` | 网络操作最多尝试次数（含首次） |
+| `RETRY_DELAY` | `5` | 失败后首次退避秒数，逐次翻倍（5s → 10s → ...） |
+
+### 网络受限环境（镜像加速）
+
+所有网络操作均带指数退避重试；如仍不稳定，可用环境变量指定国内镜像后再执行 `setup`：
+
+```bash
+export NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"        # npm 包
+export FNM_NODE_DIST_MIRROR="https://npmmirror.com/mirrors/node"   # node 发行包（fnm 原生支持）
+export FNM_INSTALL_URL="<内网镜像的 fnm 安装脚本地址>"               # 安装脚本本身
+export UV_INSTALL_URL="<内网镜像的 uv 安装脚本地址>"
+./claude-env.sh setup
+```
 
 ## 注意事项
 
@@ -70,4 +84,5 @@ claude              # 首次运行，按浏览器提示登录
 5. **bypassPermissions 意味着 Claude Code 执行任何工具操作（Bash 命令、文件读写等）都不再询问确认**，请仅在可信机器 / 隔离环境中启用；要收紧时把 `CLAUDE_PERMISSION_MODE` 改为 `default` / `acceptEdits` / `plan` 后执行 `./claude-env.sh config`。
 6. 官方限制（Claude Code v2.1.257+）：`bypassPermissions` 只在**用户级** `~/.claude/settings.json` 或托管设置中生效，项目级 `.claude/settings.json` 会被忽略——所以脚本写用户级文件；另外 root 用户运行 bypass 权限模式会被 Claude Code 限制，本脚本面向非 root 用户。
 7. `~/.claude/settings.json` 已存在时按 JSON **合并**（保留其他键，格式化为两空格缩进；空文件视为 `{}`）；写入采用临时文件 + 原子改名。顶层不是 JSON 对象、`permissions` 字段类型非法或解析失败时，脚本报错退出且**不修改原文件**。
-8. 切换 / 管理 Node 版本：`fnm install <版本>`、`fnm default <版本>`、`fnm use <版本>`，详见 [fnm 文档](https://github.com/Schniz/fnm)。
+8. 网络操作失败会自动重试（默认 3 次、指数退避）；重试耗尽后脚本带行号报错退出，**直接重跑 `setup` 即可从断点继续**（幂等）。
+9. 切换 / 管理 Node 版本：`fnm install <版本>`、`fnm default <版本>`、`fnm use <版本>`，详见 [fnm 文档](https://github.com/Schniz/fnm)。
