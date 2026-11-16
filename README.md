@@ -84,7 +84,8 @@ claude                     # 首次运行，按浏览器提示登录
 
 ```bash
 cd root-init
-sudo ./root-init.sh setup      # 自动识别 sudo 发起用户；或 sudo TARGET_USER=<用户> ./root-init.sh setup
+sudo ./root-init.sh setup      # 交互确认：枚举 UID>=1000 用户，逐个 [y/N]
+# 无人值守：sudo TARGET_USER=<用户> ./root-init.sh setup
 sudo ./root-init.sh show       # 查看包 / sudo / 转发状态
 ```
 
@@ -92,7 +93,7 @@ sudo ./root-init.sh show       # 查看包 / sudo / 转发状态
 
 ## 脚本约定
 
-- `#!/bin/bash` + `set -e`，非交互，`case` 子命令分发（`setup` / `start` / `stop` / `show` / `clean` 等）
+- `#!/bin/bash` + `set -e`，默认非交互（例外：root-init 的 sudo 目标选择默认交互确认，显式 `TARGET_USER` 时非交互），`case` 子命令分发（`setup` / `start` / `stop` / `show` / `clean` 等）
 - 幂等设计：check-then-install，重复执行自动跳过已配置部分
 - 日志前缀：`[+]` 成功、`[!]` 失败/警告、`[*]` 中性提示（如已存在跳过）
 - 每个工具的 README 包含：架构/流程说明、配置变量表、快速开始、常用命令、注意事项

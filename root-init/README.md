@@ -1,23 +1,26 @@
 # 系统级初始化（必须 root）
 
-**必须 root 运行**的系统初始化脚本，为仓库其他工具补齐系统级前提：安装系统包、为目标用户配置免密 sudo（claude-env 的 `ensure_deps` 无人值守运行 `sudo apt-get/dnf/yum` 时需要免密，否则会挂起）、可选持久化内核转发（wireguard 服务端重启后需要）。脚本幂等，可重复执行；配置变量均支持环境变量覆盖。
+**必须 root 运行**的系统初始化脚本，为仓库其他工具补齐系统级前提：安装系统包（可选包默认不安装）、为目标用户配置免密 sudo（claude-env 的 `ensure_deps` 无人值守运行 `sudo apt-get/dnf/yum` 时需要免密，否则会挂起）、可选持久化内核转发（wireguard 服务端重启后需要）。sudo 目标用户**默认枚举 UID>=1000 的普通账户并逐个交互确认**；显式指定 `TARGET_USER` 则非交互（无人值守路径）。脚本幂等，可重复执行；配置变量均支持环境变量覆盖。
 
 ```
 sudo ./root-init.sh setup
       │
       ├─ 0. 前置   root 检查 + 平台探测（apt-get/dnf/yum → 管理员组 sudo/wheel、libatomic 包名）
       ├─ 1. 核心包 sudo curl tar unzip libatomic（失败中止初始化）
-      ├─ 2. 可选包 wireguard-tools iptables（失败仅警告，不阻塞）
-      ├─ 3. sudo   目标用户加管理员组 + NOPASSWD drop-in（visudo -cf 校验通过后安装）
+      ├─ 2. 可选包 默认空不安装（OPTIONAL_PACKAGES 按需指定；失败仅警告，不阻塞）
+      ├─ 3. sudo   目标用户（显式 TARGET_USER 或枚举 UID>=1000 交互确认）
+      │            加管理员组 + NOPASSWD drop-in（visudo -cf 校验通过后安装）
       └─ 4. 可选   /etc/sysctl.d/99-root-init.conf → ip_forward=1（并立即运行时生效）
 ```
 
 ## 快速开始
 
 ```bash
-sudo ./root-init.sh setup              # 用 sudo 运行时自动识别发起用户（SUDO_USER）
-# 或显式指定目标用户：
+sudo ./root-init.sh setup              # 交互：枚举 UID>=1000 用户，逐个确认是否配置 sudo [y/N]
+# 无人值守：显式指定目标用户（不提示）：
 sudo TARGET_USER=alice ./root-init.sh setup
+# 按需安装可选包（默认不装）：
+sudo OPTIONAL_PACKAGES="wireguard-tools iptables" ./root-init.sh setup
 
 sudo ./root-init.sh show               # 查看包 / sudo / 转发状态
 ```
@@ -33,9 +36,9 @@ sudo -n true && echo "免密 sudo OK"    # -n 非交互：需要密码时立即�
 
 | 命令 | 说明 |
 |------|------|
-| `sudo ./root-init.sh setup` | 安装包 + 配置 sudo + 可选 ip_forward（幂等，可重复执行） |
+| `sudo ./root-init.sh setup` | 安装包 + 配置 sudo（默认交互确认，`TARGET_USER` 无人值守）+ 可选 ip_forward（幂等） |
 | `sudo ./root-init.sh show` | 查看各包安装状态、目标用户组 / drop-in、转发配置与当前值 |
-| `sudo ./root-init.sh clean` | 移除本脚本管理的 sudo drop-in 与 sysctl 配置（先备份；不卸载包、不移除组成员） |
+| `sudo ./root-init.sh clean` | 移除本脚本管理的 sudo drop-in（`TARGET_USER` 指定时仅该用户，否则全部普通用户）与 sysctl 配置（先备份；不卸载包、不移除组成员） |
 | `./test-root-init.sh` | 离线回归测试（shim + 临时目录，无需 root，不触碰真实系统） |
 
 ## 配置变量
@@ -44,11 +47,12 @@ sudo -n true && echo "免密 sudo OK"    # -n 非交互：需要密码时立即�
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `TARGET_USER` | `${SUDO_USER}`（sudo 运行时自动取发起者） | 要配置 sudo 的普通用户；空则跳过 sudo 配置；须通过用户名白名单校验且非 root |
+| `TARGET_USER` | `空` | 显式指定 → 非交互配置该用户（无人值守路径）；空 → 枚举 UID>=1000 的可登录普通用户逐个交互确认 `[y/N]`（非 TTY 环境跳过并提示）；须通过用户名白名单校验且非 root |
 | `SUDO_NOPASSWD` | `true` | `true`：安装 NOPASSWD 免密 drop-in；`false`：仅加管理员组并移除已有 drop-in（sudo 需密码） |
 | `CORE_PACKAGES` | `sudo curl tar unzip` | 核心包列表（空格分隔），另按发行版自动追加 `libatomic1`（Debian 系）/ `libatomic`（RHEL 系）；失败中止 |
-| `OPTIONAL_PACKAGES` | `wireguard-tools iptables` | 可选包列表；失败仅警告（RHEL 系 wireguard-tools 需 EPEL） |
+| `OPTIONAL_PACKAGES` | `空`（默认不安装） | 可选包列表，按需指定（如 `wireguard-tools iptables`）；失败仅警告（RHEL 系 wireguard-tools 需 EPEL） |
 | `ENABLE_IP_FORWARD` | `false` | `true`：持久化 `net.ipv4.ip_forward=1` 并立即生效；`false`：移除本脚本的 sysctl 配置 |
+| `PASSWD_FILE` | `/etc/passwd` | 用户枚举来源（离线测试可指向临时文件） |
 | `SUDOERS_DIR` | `/etc/sudoers.d` | drop-in 目录（离线测试可指向临时目录） |
 | `SYSCTL_FILE` | `/etc/sysctl.d/99-root-init.conf` | 本脚本管理的 sysctl 配置文件 |
 | `RETRY_MAX` | `3` | 网络操作最多尝试次数（含首次） |
@@ -62,5 +66,6 @@ sudo -n true && echo "免密 sudo OK"    # -n 非交互：需要密码时立即�
 4. **备份**：覆盖 / 移除受管文件（drop-in、sysctl 配置）前自动生成带时间戳备份 `<文件名>.bak.<时间戳>`；内容一致的幂等重跑不产生备份。
 5. **声明式收敛**：`SUDO_NOPASSWD` / `ENABLE_IP_FORWARD` 取 true/false 重跑均收敛到对应状态（安装 / 移除），与 claude-env 的配置语义一致。
 6. RHEL 系安装 wireguard-tools 通常需先启用 EPEL（`dnf install -y epel-release`）；可选包失败只警告，不阻塞核心初始化。
-7. `clean` 只移除本脚本管理的两个文件（先备份），不卸载包、不移除组成员身份。
+7. `clean` 移除受管 drop-in（`TARGET_USER` 指定时仅该用户，否则枚举全部普通用户）与 sysctl 配置（先备份），不卸载包、不移除组成员身份。
 8. 与其他工具的关系：**root-init（系统级，root）→ claude-env（用户级，普通用户）→ wireguard（root，网络配置）**；root-init 装好依赖并配好免密 sudo 后，claude-env 可全程无人值守。
+9. **交互与无人值守**：默认交互确认要求 stdin 为终端；非 TTY 环境（cron / 管道）且未指定 `TARGET_USER` 时**跳过 sudo 配置并提示**，绝不静默授权。`SUDO_USER` 仅在提示中标注「本次 sudo 发起者」作参考，不再自动配置。用户枚举排除 nobody（UID 65534）与 nologin/false shell 的服务账户。

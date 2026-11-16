@@ -1,11 +1,11 @@
 #!/bin/bash
 # 系统级初始化脚本（必须 root 运行）- 包安装 + sudo 配置 + 可选 ip_forward 持久化
-# 功能：安装系统包（核心包失败即中止 / 可选包失败仅警告），
-#       为目标用户加管理员组并配置免密 sudo（visudo 校验后安装），
-#       可选持久化内核转发（wireguard 服务端需要）
+# 功能：安装系统包（核心包失败即中止 / 可选包默认空、失败仅警告），
+#       为目标用户配置 sudo（显式 TARGET_USER 非交互；默认枚举 UID>=1000 交互确认；
+#       visudo 校验后安装），可选持久化内核转发（wireguard 服务端需要）
 #
 # 使用方式：
-#   sudo ./root-init.sh setup    # 初始化（幂等，可重复执行）
+#   sudo ./root-init.sh setup    # 初始化（幂等；sudo 配置默认交互确认，TARGET_USER=<用户> 无人值守）
 #   sudo ./root-init.sh show     # 查看包 / sudo / 转发状态
 #   sudo ./root-init.sh clean    # 移除本脚本管理的 sudo drop-in 与 sysctl 配置（先备份）
 #
@@ -13,10 +13,11 @@
 # OPTIONAL_PACKAGES / ENABLE_IP_FORWARD / RETRY_MAX / RETRY_DELAY 等），详见 README
 
 # ─── 配置区（均支持环境变量覆盖） ───
-TARGET_USER="${TARGET_USER:-${SUDO_USER:-}}"            # 要配置 sudo 的普通用户；空则跳过 sudo 配置（sudo 运行时自动取 SUDO_USER）
+TARGET_USER="${TARGET_USER:-}"                          # 显式指定 → 非交互配置该用户（无人值守路径）；空 → 枚举 UID>=1000 用户交互提示（非 TTY 跳过）
 SUDO_NOPASSWD="${SUDO_NOPASSWD:-true}"                  # true: 安装 NOPASSWD 免密 drop-in；false: 仅加管理员组（并移除已有 drop-in）
 CORE_PACKAGES="${CORE_PACKAGES:-sudo curl tar unzip}"   # 核心包：安装失败中止初始化（libatomic 按发行版自动追加）
-OPTIONAL_PACKAGES="${OPTIONAL_PACKAGES:-wireguard-tools iptables}"  # 可选包：失败仅警告（RHEL 系 wireguard-tools 需 EPEL）
+OPTIONAL_PACKAGES="${OPTIONAL_PACKAGES:-}"              # 可选包：默认空不安装；按需指定（如 "wireguard-tools iptables"，RHEL 系需 EPEL）
+PASSWD_FILE="${PASSWD_FILE:-/etc/passwd}"               # 用户枚举来源（离线测试可指向临时文件）
 ENABLE_IP_FORWARD="${ENABLE_IP_FORWARD:-false}"         # true: 持久化 net.ipv4.ip_forward=1（wireguard 服务端重启后需要）
 SUDOERS_DIR="${SUDOERS_DIR:-/etc/sudoers.d}"            # sudoers drop-in 目录（离线测试可指向临时目录）
 SYSCTL_FILE="${SYSCTL_FILE:-/etc/sysctl.d/99-root-init.conf}"  # 本脚本管理的 sysctl 配置
@@ -113,36 +114,92 @@ remove_managed_file() { # remove_managed_file <file>
     fi
 }
 
-# ─── 配置目标用户 sudo：管理员组 + 声明式 NOPASSWD drop-in ───
-configure_sudo() {
-    if [ -z "$TARGET_USER" ]; then
-        echo "[*] 未指定 TARGET_USER（且无 SUDO_USER），跳过 sudo 配置"
-        return 0
-    fi
-    if ! validate_username "$TARGET_USER"; then
-        echo "[!] 非法目标用户：$TARGET_USER（须小写字母/underscore 开头，仅含小写字母/数字/_/-，且非 root）"
+# ─── 枚举普通用户：UID>=1000 且 <65534（排除 nobody），排除 nologin/false shell 的服务账户 ───
+list_regular_users() {
+    if [ ! -f "$PASSWD_FILE" ]; then
+        echo "[!] passwd 文件不存在：$PASSWD_FILE" >&2
         return 1
     fi
-    if ! id "$TARGET_USER" &>/dev/null; then
-        echo "[!] 用户不存在：$TARGET_USER（请先创建用户再运行本脚本）"
+    awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false)$/ {print $1}' "$PASSWD_FILE"
+}
+
+# ─── 是否交互环境（stdin 为终端）；离线测试可覆写本函数 ───
+is_interactive() {
+    [ -t 0 ]
+}
+
+# ─── 解析 sudo 目标用户：显式 TARGET_USER 直接返回；否则枚举并逐个交互确认 ───
+# stdout 输出选中的用户名（每行一个）；提示与跳过原因走 stderr
+resolve_target_users() {
+    if [ -n "$TARGET_USER" ]; then
+        printf '%s\n' "$TARGET_USER"
+        return 0
+    fi
+    local candidates u answer hint
+    candidates=$(list_regular_users) || return 1
+    if [ -z "$candidates" ]; then
+        echo "[*] 未检测到 UID>=1000 的可登录普通用户，跳过 sudo 配置" >&2
+        return 0
+    fi
+    if ! is_interactive; then
+        echo "[*] 非交互环境且未指定 TARGET_USER，跳过 sudo 配置（无人值守请显式设置 TARGET_USER）" >&2
+        return 0
+    fi
+    echo "检测到以下普通用户（UID>=1000），逐个确认是否配置 sudo：" >&2
+    # 候选列表走 FD3，stdin 留给交互回答（避免 read 把候选列表误当回答）
+    while IFS= read -r u <&3; do
+        hint=""
+        if [ "$u" = "${SUDO_USER:-}" ]; then
+            hint="（本次 sudo 发起者）"
+        fi
+        if ! read -r -p "  是否为 $u$hint 配置 sudo？[y/N] " answer; then
+            answer=""   # EOF 视为拒绝
+        fi
+        case "$answer" in
+            y|Y|yes|YES) printf '%s\n' "$u" ;;
+        esac
+    done 3<<< "$candidates"
+}
+
+# ─── 对解析出的全部目标用户配置 sudo ───
+configure_sudo_targets() {
+    local users u
+    users=$(resolve_target_users)
+    if [ -z "$users" ]; then
+        return 0
+    fi
+    while IFS= read -r u; do
+        configure_sudo "$u" || return 1
+    done <<< "$users"
+}
+
+# ─── 配置单个用户 sudo：管理员组 + 声明式 NOPASSWD drop-in ───
+configure_sudo() { # configure_sudo <user>
+    local user="$1"
+    if ! validate_username "$user"; then
+        echo "[!] 非法目标用户：$user（须小写字母/underscore 开头，仅含小写字母/数字/_/-，且非 root）"
+        return 1
+    fi
+    if ! id "$user" &>/dev/null; then
+        echo "[!] 用户不存在：$user（请先创建用户再运行本脚本）"
         return 1
     fi
 
     # 管理员组（check-before-act，幂等；-aG 追加，不影响其他组）
-    if id -nG "$TARGET_USER" | grep -qw "$ADMIN_GROUP"; then
-        echo "[*] $TARGET_USER 已在 $ADMIN_GROUP 组，跳过"
+    if id -nG "$user" | grep -qw "$ADMIN_GROUP"; then
+        echo "[*] $user 已在 $ADMIN_GROUP 组，跳过"
     else
-        if ! usermod -aG "$ADMIN_GROUP" "$TARGET_USER"; then
-            echo "[!] 加组失败：usermod -aG $ADMIN_GROUP $TARGET_USER"
+        if ! usermod -aG "$ADMIN_GROUP" "$user"; then
+            echo "[!] 加组失败：usermod -aG $ADMIN_GROUP $user"
             return 1
         fi
-        echo "[+] 已将 $TARGET_USER 加入 $ADMIN_GROUP 组"
+        echo "[+] 已将 $user 加入 $ADMIN_GROUP 组"
     fi
 
     # NOPASSWD drop-in（声明式：true 安装 / false 移除，重跑收敛）
-    local dropin="$SUDOERS_DIR/$TARGET_USER" r
+    local dropin="$SUDOERS_DIR/$user" r
     if [ "$SUDO_NOPASSWD" = "true" ]; then
-        if ! r=$(write_managed_file "$dropin" "$TARGET_USER ALL=(ALL) NOPASSWD: ALL" 0440 visudo -cf); then
+        if ! r=$(write_managed_file "$dropin" "$user ALL=(ALL) NOPASSWD: ALL" 0440 visudo -cf); then
             echo "[!] sudoers drop-in 未通过 visudo -cf 校验，未安装 $dropin"
             return 1
         fi
@@ -150,6 +207,7 @@ configure_sudo() {
             echo "[*] $dropin 内容已一致，跳过"
         else
             echo "[+] 已安装 $dropin（NOPASSWD，0440，visudo 校验通过）"
+            echo "    注意：$user 已拥有免密 root 权限，仅限可信机器；收紧：SUDO_NOPASSWD=false"
         fi
     else
         r=$(remove_managed_file "$dropin")
@@ -186,9 +244,8 @@ manage_ip_forward() {
 
 # ─── 安装系统包：核心包失败中止，可选包失败仅警告 ───
 install_packages() {
-    local -a core opt
+    local -a core
     read -r -a core <<< "$CORE_PACKAGES $LIBATOMIC_PKG"
-    read -r -a opt <<< "$OPTIONAL_PACKAGES"
 
     echo "[*] 安装核心包：${core[*]}"
     case "$PKG_MGR" in
@@ -210,6 +267,20 @@ install_packages() {
     esac
     echo "[+] 核心包已安装"
 
+    install_optional_packages
+}
+
+# ─── 安装可选包：默认空则跳过；失败仅警告不阻塞 ───
+install_optional_packages() {
+    local -a opt
+    opt=()
+    if [ -n "$OPTIONAL_PACKAGES" ]; then
+        read -r -a opt <<< "$OPTIONAL_PACKAGES"
+    fi
+    if [ "${#opt[@]}" -eq 0 ]; then
+        echo "[*] 可选包列表为空，跳过（如需安装：OPTIONAL_PACKAGES=\"wireguard-tools iptables\"）"
+        return 0
+    fi
     echo "[*] 安装可选包：${opt[*]}"
     local opt_ok=true
     case "$PKG_MGR" in
@@ -259,7 +330,15 @@ show_status() {
             echo "  NOPASSWD drop-in: 未安装"
         fi
     else
-        echo "  目标用户: 未指定（TARGET_USER / SUDO_USER 均空）"
+        echo "  目标用户: 未指定（setup 时枚举 UID>=1000 交互选择）"
+        local u
+        while IFS= read -r u; do
+            if [ -f "$SUDOERS_DIR/$u" ]; then
+                echo "  drop-in: $u（已安装）"
+            else
+                echo "  drop-in: $u（未安装）"
+            fi
+        done < <(list_regular_users)
     fi
     echo "── 内核转发 ──"
     if [ -f "$SYSCTL_FILE" ]; then
@@ -273,7 +352,7 @@ show_status() {
 # ─── 初始化 ───
 setup() {
     install_packages || return 1
-    configure_sudo || return 1
+    configure_sudo_targets || return 1
     manage_ip_forward || return 1
     if [ "$ENABLE_IP_FORWARD" = "true" ]; then
         sysctl -w net.ipv4.ip_forward=1 > /dev/null
@@ -281,23 +360,27 @@ setup() {
     fi
     echo ""
     echo "[+] 系统初始化完成"
-    if [ -n "$TARGET_USER" ] && [ "$SUDO_NOPASSWD" = "true" ]; then
-        echo "    注意：$TARGET_USER 已拥有免密 sudo（NOPASSWD），仅限可信机器；"
-        echo "    收紧：sudo SUDO_NOPASSWD=false TARGET_USER=$TARGET_USER $0 setup"
-    fi
 }
 
 # ─── 清理本脚本管理的配置（不卸载包、不移除组成员） ───
 clean() {
-    local r
-    if [ -n "$TARGET_USER" ] && validate_username "$TARGET_USER"; then
-        r=$(remove_managed_file "$SUDOERS_DIR/$TARGET_USER")
-        if [ "$r" = "removed" ]; then
-            echo "[+] 已移除 sudo drop-in（备份保留）"
-        else
-            echo "[*] sudo drop-in 不存在"
-        fi
+    local r u
+    local -a users
+    if [ -n "$TARGET_USER" ]; then
+        users=("$TARGET_USER")
+    else
+        mapfile -t users < <(list_regular_users)
     fi
+    for u in "${users[@]}"; do
+        if validate_username "$u"; then
+            r=$(remove_managed_file "$SUDOERS_DIR/$u")
+            if [ "$r" = "removed" ]; then
+                echo "[+] 已移除 $SUDOERS_DIR/$u（备份保留）"
+            else
+                echo "[*] $SUDOERS_DIR/$u 不存在"
+            fi
+        fi
+    done
     r=$(remove_managed_file "$SYSCTL_FILE")
     if [ "$r" = "removed" ]; then
         echo "[+] 已移除 $SYSCTL_FILE（备份保留）"
@@ -330,7 +413,7 @@ main() {
         clean) clean ;;
         *)
             echo "用法（必须 root）："
-            echo "  sudo $0 setup    # 安装包 + 配置 sudo + 可选 ip_forward（幂等）"
+            echo "  sudo $0 setup    # 安装包 + 配置 sudo（默认交互确认；TARGET_USER=<用户> 无人值守）+ 可选 ip_forward"
             echo "  sudo $0 show     # 查看包 / sudo / 转发状态"
             echo "  sudo $0 clean    # 移除本脚本管理的 drop-in 与 sysctl 配置（先备份）"
             ;;

@@ -1,6 +1,6 @@
 #!/bin/bash
 # root-init.sh 离线回归测试：source 被测脚本后直调函数，
-# 用 PATH shim 替代 id / usermod / visudo，所有文件操作指向 mktemp 临时目录，
+# 用 PATH shim 替代 id / usermod / visudo / apt-get，所有文件操作指向 mktemp 临时目录，
 # 不触碰真实 /etc、不需要 root、无网络。
 # 用法：./test-root-init.sh    （退出码 0 = 全部通过）
 
@@ -40,15 +40,34 @@ cat > "$SHIM_DIR/visudo" <<'EOF'
 echo "visudo $*" >> "$SHIM_LOG"
 exit "${FAKE_VISUDO_RC:-0}"
 EOF
-chmod +x "$SHIM_DIR/id" "$SHIM_DIR/usermod" "$SHIM_DIR/visudo"
+cat > "$SHIM_DIR/apt-get" <<'EOF'
+#!/bin/bash
+echo "apt-get $*" >> "$SHIM_LOG"
+exit "${FAKE_APT_RC:-0}"
+EOF
+chmod +x "$SHIM_DIR/id" "$SHIM_DIR/usermod" "$SHIM_DIR/visudo" "$SHIM_DIR/apt-get"
 export PATH="$SHIM_DIR:$PATH"
-export FAKE_UID=0 FAKE_GROUPS="" FAKE_USER_EXISTS=true FAKE_VISUDO_RC=0 FAKE_USERMOD_RC=0
+export FAKE_UID=0 FAKE_GROUPS="" FAKE_USER_EXISTS=true FAKE_VISUDO_RC=0 FAKE_USERMOD_RC=0 FAKE_APT_RC=0
 
-# ── 被测脚本的路径变量全部指向临时目录 ──
+# ── 被测脚本的路径变量全部指向临时目录；重试调快 ──
 export SUDOERS_DIR="$WORK_DIR/sudoers.d"
 export SYSCTL_FILE="$WORK_DIR/sysctl.conf"
+export PASSWD_FILE="$WORK_DIR/passwd"
+export RETRY_MAX=2 RETRY_DELAY=0
 export ADMIN_GROUP=wheel
 source "$SUT"
+
+# 测试环境默认非交互；交互用例临时覆写 is_interactive
+is_interactive() { return 1; }
+
+# 模拟 passwd：alice/bob 普通用户，svc 为 nologin 服务账户，nobody 65534
+cat > "$PASSWD_FILE" <<'EOF'
+root:x:0:0:root:/root:/bin/bash
+alice:x:1000:1000::/home/alice:/bin/bash
+bob:x:1001:1001::/home/bob:/bin/bash
+svc:x:1002:1002::/home/svc:/usr/sbin/nologin
+nobody:x:65534:65534::/nonexistent:/usr/sbin/nologin
+EOF
 
 PASS=0
 FAIL=0
@@ -101,39 +120,102 @@ if [ -n "$bak" ] && [ "$(cat "$bak")" = "line2" ]; then ok "W5 删除前备份�
 r=$(remove_managed_file "$f")
 check "W6 不存在输出 absent" [ "$r" = "absent" ]
 
-echo "== S configure_sudo：目标用户 / 组 / drop-in =="
+echo "== P 用户枚举与交互选择 =="
+out=$(list_regular_users)
+check "P1 枚举 UID>=1000 且排除 nologin/nobody" [ "$out" = "alice
+bob" ]
+TARGET_USER=carol
+out=$(resolve_target_users 2>/dev/null)
+check "P2 显式 TARGET_USER 直接返回（不提示）" [ "$out" = "carol" ]
 TARGET_USER=""
-out=$(configure_sudo 2>&1)
-case "$out" in *跳过*) ok "S1 无目标用户跳过";; *) bad "S1 无目标用户跳过";; esac
-TARGET_USER="bad.name"
-if configure_sudo >/dev/null 2>&1; then bad "S2 非法用户名应失败"; else ok "S2 非法用户名失败"; fi
-TARGET_USER=alice FAKE_USER_EXISTS=false
-if configure_sudo >/dev/null 2>&1; then bad "S3 用户不存在应失败"; else ok "S3 用户不存在失败"; fi
+out=$(resolve_target_users 2>&1 >/dev/null)
+case "$out" in *非交互*) ok "P3 非交互环境提示跳过";; *) bad "P3 非交互环境提示跳过";; esac
+out=$(resolve_target_users 2>/dev/null)
+check "P3 非交互环境不选择任何用户" [ -z "$out" ]
+is_interactive() { return 0; }
+out=$(resolve_target_users <<< "y
+n" 2>/dev/null)
+check "P4 交互 y/n 仅选 alice" [ "$out" = "alice" ]
+out=$(resolve_target_users <<< "y
+y" 2>/dev/null)
+check "P5 交互 y/y 选 alice+bob" [ "$out" = "alice
+bob" ]
+out=$(resolve_target_users </dev/null 2>/dev/null)
+check "P6 交互 EOF 不选任何用户且不报错" [ -z "$out" ]
+empty_passwd="$WORK_DIR/passwd-empty"
+printf '%s\n' "root:x:0:0:root:/root:/bin/bash" "nobody:x:65534:65534::/nonexistent:/usr/sbin/nologin" > "$empty_passwd"
+PASSWD_FILE="$empty_passwd"
+out=$(resolve_target_users 2>&1 >/dev/null)
+case "$out" in *未检测到*) ok "P7 无候选用户提示跳过";; *) bad "P7 无候选用户提示跳过";; esac
+PASSWD_FILE="$WORK_DIR/passwd"
+is_interactive() { return 1; }
+
+echo "== S configure_sudo <user>：组 / drop-in =="
+FAKE_USER_EXISTS=false
+if configure_sudo alice >/dev/null 2>&1; then bad "S3 用户不存在应失败"; else ok "S3 用户不存在失败"; fi
 FAKE_USER_EXISTS=true
-TARGET_USER=alice FAKE_GROUPS="alice" SUDO_NOPASSWD=true
+if configure_sudo bad.name >/dev/null 2>&1; then bad "S2 非法用户名应失败"; else ok "S2 非法用户名失败"; fi
+FAKE_GROUPS="alice" SUDO_NOPASSWD=true
 reset_log
-configure_sudo >/dev/null 2>&1
+configure_sudo alice >/dev/null 2>&1
 check "S4 不在组时调用 usermod -aG" grep -q "usermod -aG wheel alice" "$SHIM_LOG"
 check "S6 drop-in 内容正确" bash -c "[ \"\$(cat '$SUDOERS_DIR/alice')\" = 'alice ALL=(ALL) NOPASSWD: ALL' ]"
 assert_mode "$SUDOERS_DIR/alice" 440 "S6 drop-in 权限 0440"
 check "S6 安装前经 visudo -cf 校验" grep -q "visudo -cf" "$SHIM_LOG"
-TARGET_USER=alice FAKE_GROUPS="alice wheel" SUDO_NOPASSWD=true
+FAKE_GROUPS="alice wheel" SUDO_NOPASSWD=true
 reset_log
-out=$(configure_sudo 2>&1)
+configure_sudo alice >/dev/null 2>&1
 check "S5 已在组时不调用 usermod" bash -c "! grep -q usermod '$SHIM_LOG'"
 baks_before=$(count_baks "$SUDOERS_DIR/alice")
-out=$(configure_sudo 2>&1)
+out=$(configure_sudo alice 2>&1)
 case "$out" in *跳过*) ok "S7 drop-in 幂等跳过";; *) bad "S7 drop-in 幂等跳过";; esac
 check "S7 跳过不产生新备份" [ "$(count_baks "$SUDOERS_DIR/alice")" = "$baks_before" ]
-TARGET_USER=alice SUDO_NOPASSWD=false
-configure_sudo >/dev/null 2>&1
+SUDO_NOPASSWD=false
+configure_sudo alice >/dev/null 2>&1
 check "S8 false 时移除 drop-in" bash -c "[ ! -f '$SUDOERS_DIR/alice' ]"
 check "S8 移除前有备份" [ "$(count_baks "$SUDOERS_DIR/alice")" -ge 1 ]
-TARGET_USER=alice SUDO_NOPASSWD=true FAKE_VISUDO_RC=1
+SUDO_NOPASSWD=true FAKE_VISUDO_RC=1
 rm -f "$SUDOERS_DIR/alice"
-if configure_sudo >/dev/null 2>&1; then bad "S9 visudo 失败应返回非零"; else ok "S9 visudo 失败返回非零"; fi
+if configure_sudo alice >/dev/null 2>&1; then bad "S9 visudo 失败应返回非零"; else ok "S9 visudo 失败返回非零"; fi
 check "S9 校验失败不安装 drop-in" bash -c "[ ! -f '$SUDOERS_DIR/alice' ]"
 FAKE_VISUDO_RC=0
+
+echo "== T configure_sudo_targets：单目标 / 交互多目标 =="
+rm -f "$SUDOERS_DIR/alice" "$SUDOERS_DIR/bob"
+TARGET_USER=alice SUDO_NOPASSWD=true FAKE_GROUPS="alice wheel"
+configure_sudo_targets >/dev/null 2>&1
+check "T1 显式目标配置 drop-in" bash -c "[ -f '$SUDOERS_DIR/alice' ]"
+TARGET_USER=""
+is_interactive() { return 0; }
+configure_sudo_targets <<< "y
+y" >/dev/null 2>&1
+check "T2 交互选两人均配置 drop-in" bash -c "[ -f '$SUDOERS_DIR/alice' ] && [ -f '$SUDOERS_DIR/bob' ]"
+is_interactive() { return 1; }
+
+echo "== O install_optional_packages：默认空 / 按需安装 / 失败降级 =="
+PKG_MGR=apt-get
+OPTIONAL_PACKAGES=""
+reset_log
+out=$(install_optional_packages 2>&1)
+case "$out" in *为空*) ok "O1 空列表提示跳过";; *) bad "O1 空列表提示跳过";; esac
+check "O1 空列表不调用包管理器" bash -c "! grep -q apt-get '$SHIM_LOG'"
+OPTIONAL_PACKAGES="wireguard-tools iptables"
+reset_log
+install_optional_packages >/dev/null 2>&1
+check "O2 按需安装调用 apt-get" grep -q "apt-get install.*wireguard-tools iptables" "$SHIM_LOG"
+FAKE_APT_RC=1
+out=$(install_optional_packages 2>&1)
+rc=$?
+check "O3 失败降级为警告（返回 0）" [ "$rc" -eq 0 ]
+case "$out" in *失败*) ok "O3 输出失败警告";; *) bad "O3 输出失败警告";; esac
+FAKE_APT_RC=0
+
+echo "== C clean：未指定 TARGET_USER 时清理所有普通用户 drop-in =="
+TARGET_USER=""
+clean >/dev/null 2>&1
+check "C1 alice drop-in 已移除" bash -c "[ ! -f '$SUDOERS_DIR/alice' ]"
+check "C1 bob drop-in 已移除" bash -c "[ ! -f '$SUDOERS_DIR/bob' ]"
+check "C1 移除前有备份" [ "$(count_baks "$SUDOERS_DIR/alice")" -ge 1 ]
 
 echo "== I manage_ip_forward：声明式收敛 =="
 ENABLE_IP_FORWARD=true
