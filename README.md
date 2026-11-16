@@ -10,9 +10,13 @@ sre-tools/
 │   ├── wireguard-server.sh
 │   ├── wireguard-client.sh
 │   └── README.md
-└── claude-env/                 # Claude Code 开发环境一键初始化
-    ├── claude-env.sh
-    ├── test-claude-env.sh
+├── claude-env/                 # Claude Code 开发环境一键初始化
+│   ├── claude-env.sh
+│   ├── test-claude-env.sh
+│   └── README.md
+└── root-init/                  # 系统级初始化（root）：包安装 + sudo 配置
+    ├── root-init.sh
+    ├── test-root-init.sh
     └── README.md
 ```
 
@@ -20,6 +24,7 @@ sre-tools/
 
 | 工具 | 用途 | 运行身份 | 详细文档 |
 |------|------|---------|---------|
+| `root-init/` | 系统级初始化：安装系统包、为目标用户配置免密 sudo、可选持久化 ip_forward | root | [root-init/README.md](root-init/README.md) |
 | `wireguard/` | 两台 Linux 服务器间建立 WireGuard 隧道，客户端所有非内网流量经服务端 NAT 出网 | root | [wireguard/README.md](wireguard/README.md) |
 | `claude-env/` | 一键安装 fnm + uv + Node LTS + Claude Code，并配置 bypassPermissions 权限模式 | 普通用户 | [claude-env/README.md](claude-env/README.md) |
 
@@ -72,6 +77,18 @@ claude                     # 首次运行，按浏览器提示登录
 > **注意**：bypassPermissions 下 Claude Code 执行任何工具操作（Bash、文件读写等）不再询问确认，仅在可信机器上启用；收紧方法见 [claude-env/README.md](claude-env/README.md)。
 
 其他子命令：`config`（仅重写权限配置）、`show`（查看各组件状态），详见 [claude-env/README.md](claude-env/README.md)。
+
+### 4. root-init：系统级初始化（root）
+
+新机器上先以 root 补齐系统级前提（系统包 + 目标用户免密 sudo），之后 claude-env 即可全程无人值守：
+
+```bash
+cd root-init
+sudo ./root-init.sh setup      # 自动识别 sudo 发起用户；或 sudo TARGET_USER=<用户> ./root-init.sh setup
+sudo ./root-init.sh show       # 查看包 / sudo / 转发状态
+```
+
+> **注意**：默认给目标用户配置 NOPASSWD 免密 sudo（完全 root 权限），仅限可信机器；收紧方法与安全护栏（visudo 校验、用户名白名单、覆盖前备份）见 [root-init/README.md](root-init/README.md)。
 
 ## 脚本约定
 
