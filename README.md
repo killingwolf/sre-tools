@@ -12,6 +12,7 @@ sre-tools/
 │   └── README.md
 └── claude-env/                 # Claude Code 开发环境一键初始化
     ├── claude-env.sh
+    ├── test-claude-env.sh
     └── README.md
 ```
 
@@ -66,7 +67,7 @@ claude --version           # 验证安装
 claude                     # 首次运行，按浏览器提示登录
 ```
 
-安装内容：fnm（node 版本管理）、uv（python 项目管理）、最新 LTS node、`@anthropic-ai/claude-code`，最后向用户级 `~/.claude/settings.json` 写入 `permissions.defaultMode: bypassPermissions`。
+安装内容：fnm（node 版本管理）、uv（python 项目管理）、最新 LTS node、`@anthropic-ai/claude-code`，最后向用户级 `~/.claude/settings.json` 写入 `permissions.defaultMode: bypassPermissions` 与 `skipDangerousModePermissionPrompt: true`（跳过 bypass 模式启动时的危险模式确认弹窗），并向 `~/.claude.json` 写入 `hasCompletedOnboarding: true`（跳过首次启动引导，保留登录态等其他键）。
 
 > **注意**：bypassPermissions 下 Claude Code 执行任何工具操作（Bash、文件读写等）不再询问确认，仅在可信机器上启用；收紧方法见 [claude-env/README.md](claude-env/README.md)。
 
