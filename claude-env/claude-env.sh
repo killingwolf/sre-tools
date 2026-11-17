@@ -662,7 +662,7 @@ banner() {
     echo "  下一步："
     echo "    1. source ~/.bashrc        # 或新开一个终端"
     echo "    2. claude --version        # 验证安装"
-    echo "    3. claude                  # 首次运行，按浏览器提示登录"
+    echo "    3. claude -p hi                 # 首次运行，按浏览器提示登录"
     echo "==========================================="
 }
 
