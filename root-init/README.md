@@ -69,5 +69,5 @@ sudo -n true && echo "免密 sudo OK"    # -n 非交互：需要密码时立即�
 5. **声明式收敛**：`SUDO_NOPASSWD` / `ENABLE_IP_FORWARD` 取 true/false 重跑均收敛到对应状态（安装 / 移除），与 claude-env 的配置语义一致。
 6. **gh 独立安装**：脚本直接使用当前 apt-get/dnf/yum 软件源安装 `gh`，不会新增或修改 EPEL 等软件源。安装失败只输出警告并继续后续 sudo/sysctl 初始化；用户可根据提示稍后手动安装。RHEL 系可选包 wireguard-tools 如需 EPEL，也请自行配置；可选包失败同样只警告。
 7. `clean` 移除受管 drop-in（`TARGET_USER` 指定时仅该用户，否则枚举全部普通用户）与 sysctl 配置（先备份），不卸载包、不移除组成员身份。
-8. 与其他工具的关系：**root-init（系统级，root）→ claude-env（用户级，普通用户）→ wireguard（root，网络配置）**；root-init 装好依赖并配好免密 sudo 后，claude-env 的系统依赖安装可无人值守（首次 API 环境变量输入与 TeamAI 初始化仍可能需要交互）。独立安装的 **gh** 是 GitHub CLI，供 TeamAI 默认 GitHub 仓库的认证与后续协作使用。
+8. 与其他工具的关系：**root-init（系统级，root）→ claude-env（用户级，普通用户）→ wireguard（root，网络配置）**；root-init 装好依赖并配好免密 sudo 后，claude-env 的系统依赖安装可无人值守（首次 API 环境变量输入仍需交互；TeamAI 仅输出手动初始化命令）。独立安装的 **gh** 是 GitHub CLI，供 TeamAI 默认 GitHub 仓库的认证与后续协作使用。
 9. **交互与无人值守**：默认交互确认要求 stdin 为终端；非 TTY 环境（cron / 管道）且未指定 `TARGET_USER` 时**跳过 sudo 配置并提示**，绝不静默授权。`SUDO_USER` 仅在提示中标注「本次 sudo 发起者」作参考，不再自动配置。用户枚举排除 nobody（UID 65534）与 nologin/false shell 的服务账户。

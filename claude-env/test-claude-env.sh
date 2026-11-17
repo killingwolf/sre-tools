@@ -259,10 +259,7 @@ mkdir -p "$teamai_shim_dir"
 teamai_log="$WORK_DIR/teamai.log"
 cat > "$teamai_shim_dir/teamai" <<'EOF'
 #!/bin/bash
-case "${1:-}" in
-    init) printf '%s\n' "$*" >> "$TEAMAI_LOG" ;;
-    status) printf 'repo: %s\n' "${TEAMAI_EFFECTIVE_REPO_URL:-https://github.com/killingwolf/aiwolfs.git}" ;;
-esac
+printf '%s\n' "$*" >> "$TEAMAI_LOG"
 EOF
 cat > "$teamai_shim_dir/fnm" <<'EOF'
 #!/bin/bash
@@ -273,48 +270,35 @@ chmod +x "$teamai_shim_dir/teamai" "$teamai_shim_dir/fnm"
 mkdir -p "$WORK_DIR/teamai-home"
 : > "$teamai_log"
 env -u TEAMAI_REPO_URL HOME="$WORK_DIR/teamai-home" PATH="$teamai_shim_dir:$PATH" \
-    TEAMAI_LOG="$teamai_log" TEAMAI_INIT_TIMEOUT=5 \
-    bash "$SUT" teamai >/dev/null 2>&1
-if [ "$(cat "$teamai_log")" = "init https://github.com/killingwolf/aiwolfs --scope user" ]; then
-    ok "T22 默认执行 teamai init <完整 URL> --scope user"
+    TEAMAI_LOG="$teamai_log" \
+    bash "$SUT" teamai >"$WORK_DIR/t22.out" 2>&1
+case "$(cat "$WORK_DIR/t22.out")" in
+    *'teamai init https://github.com/killingwolf/aiwolfs --scope user'*) ok "T22 输出默认 TeamAI 手动初始化命令" ;;
+    *) bad "T22 输出默认 TeamAI 手动初始化命令" ;;
+esac
+if [ ! -s "$teamai_log" ]; then
+    ok "T22 仅提示，不执行 teamai"
 else
-    bad "T22 默认执行 teamai init <完整 URL> --scope user"
+    bad "T22 仅提示，不执行 teamai"
 fi
 
-echo "== T23 teamai：支持自定义仓库并在失败后重试 =="
+echo "== T23 teamai：自定义仓库仅输出手动命令 =="
 cat > "$teamai_shim_dir/teamai" <<'EOF'
 #!/bin/bash
-case "${1:-}" in
-    init)
-        printf '%s\n' "$*" >> "$TEAMAI_LOG"
-        if [ ! -f "$TEAMAI_ATTEMPT_FILE" ]; then
-            : > "$TEAMAI_ATTEMPT_FILE"
-            exit 1
-        fi
-        ;;
-    status)
-        if [ "${TEAMAI_LOG_STATUS:-false}" = "true" ]; then printf '%s\n' status >> "$TEAMAI_LOG"; fi
-        printf 'repo: %s\n' "${TEAMAI_EFFECTIVE_REPO_URL:-https://git.example.com/team/custom.git}"
-        ;;
-esac
+printf '%s\n' "$*" >> "$TEAMAI_LOG"
 EOF
 chmod +x "$teamai_shim_dir/teamai"
 : > "$teamai_log"
-rm -f "$WORK_DIR/teamai-attempt"
 env HOME="$WORK_DIR/teamai-home" PATH="$teamai_shim_dir:$PATH" \
-    TEAMAI_LOG="$teamai_log" TEAMAI_ATTEMPT_FILE="$WORK_DIR/teamai-attempt" \
-    TEAMAI_REPO_URL="https://git.example.com/team/custom.git" \
-    RETRY_MAX=2 RETRY_DELAY=0 TEAMAI_INIT_TIMEOUT=5 \
-    bash "$SUT" teamai >/dev/null 2>&1
-expected="init https://git.example.com/team/custom.git --scope user
-init https://git.example.com/team/custom.git --scope user"
-if [ "$(cat "$teamai_log")" = "$expected" ]; then
-    ok "T23 自定义 URL 正确且首次失败后重试成功"
-else
-    bad "T23 自定义 URL 正确且首次失败后重试成功"
-fi
+    TEAMAI_LOG="$teamai_log" TEAMAI_REPO_URL="https://git.example.com/team/custom.git" \
+    bash "$SUT" teamai >"$WORK_DIR/t23.out" 2>&1
+case "$(cat "$WORK_DIR/t23.out")" in
+    *'teamai init https://git.example.com/team/custom.git --scope user'*) ok "T23 输出自定义仓库手动命令" ;;
+    *) bad "T23 输出自定义仓库手动命令" ;;
+esac
+if [ ! -s "$teamai_log" ]; then ok "T23 自定义仓库也不执行 teamai"; else bad "T23 自定义仓库也不执行 teamai"; fi
 
-echo "== T24 setup 公共入口：npm 工具完成后初始化 TeamAI =="
+echo "== T24 setup 公共入口：TeamAI 仅提示不执行 =="
 setup_shim_dir="$WORK_DIR/setup-bin"
 setup_home="$WORK_DIR/setup-home"
 setup_log="$WORK_DIR/setup-order.log"
@@ -359,10 +343,7 @@ if [ "${ANTHROPIC_AUTH_TOKEN+x}" = x ] || [ "${ANTHROPIC_AUTH_TOKEN_VALUE+x}" = 
    [ "${ANTHROPIC_BASE_URL+x}" = x ] || [ "${ANTHROPIC_BASE_URL_VALUE+x}" = x ]; then
     : > "$TOKEN_LEAK_FILE"
 fi
-case "${1:-}" in
-    init) printf '%s\n' "$*" >> "$ORDER_LOG" ;;
-    status) printf '%s\n' 'repo: https://github.com/killingwolf/aiwolfs.git' ;;
-esac
+printf '%s\n' "$*" >> "$ORDER_LOG"
 EOF
 for cmd in curl tar unzip sudo apt-get dnf yum; do
     cat > "$setup_shim_dir/$cmd" <<'EOF'
@@ -384,8 +365,8 @@ if env -u TEAMAI_REPO_URL HOME="$setup_home" PATH="$setup_shim_dir:$PATH" ORDER_
     BASHRC_FILE="$setup_home/.bashrc" \
     ANTHROPIC_BASE_URL="https://api.example.com" ANTHROPIC_AUTH_TOKEN="test-token" \
     ANTHROPIC_BASE_URL_VALUE="pre-exported" ANTHROPIC_AUTH_TOKEN_VALUE="pre-exported" \
-    RETRY_MAX=1 RETRY_DELAY=0 TEAMAI_INIT_TIMEOUT=5 \
-    bash "$SUT" setup >/dev/null 2>&1; then
+    RETRY_MAX=1 RETRY_DELAY=0 \
+    bash "$SUT" setup >"$WORK_DIR/t24.out" 2>&1; then
     ok "T24 隔离 setup 正常完成"
 else
     bad "T24 隔离 setup 正常完成"
@@ -393,12 +374,23 @@ fi
 expected="npm ls -g --depth=0 @anthropic-ai/claude-code
 npm install -g @anthropic-ai/claude-code@latest
 npm ls -g --depth=0 teamai-cli
-npm install -g teamai-cli@latest
-init https://github.com/killingwolf/aiwolfs --scope user"
+npm install -g teamai-cli@latest"
 if [ "$(cat "$setup_log")" = "$expected" ]; then
-    ok "T24 TeamAI 初始化位于 Claude Code 与 teamai-cli 安装之后"
+    ok "T24 setup 未调用 teamai init/status"
 else
-    bad "T24 TeamAI 初始化位于 Claude Code 与 teamai-cli 安装之后"
+    bad "T24 setup 未调用 teamai init/status"
+fi
+case "$(cat "$WORK_DIR/t24.out")" in
+    *'teamai init https://github.com/killingwolf/aiwolfs --scope user'*) ok "T24 setup 输出 TeamAI 手动命令" ;;
+    *) bad "T24 setup 输出 TeamAI 手动命令" ;;
+esac
+teamai_hint_line="$(grep -n 'teamai init ' "$WORK_DIR/t24.out" | head -1 | cut -d: -f1)"
+claude_start_line="$(grep -n '3\. claude -p hi' "$WORK_DIR/t24.out" | head -1 | cut -d: -f1)"
+if [ -n "$teamai_hint_line" ] && [ -n "$claude_start_line" ] && \
+    [ "$teamai_hint_line" -lt "$claude_start_line" ]; then
+    ok "T24 TeamAI 提示位于 claude -p hi 之前"
+else
+    bad "T24 TeamAI 提示位于 claude -p hi 之前"
 fi
 if [ ! -e "$WORK_DIR/token-leaked" ]; then
     ok "T24 环境 Token 不继承给 npm 或 TeamAI 子进程"
@@ -410,18 +402,6 @@ if [ ! -e "$WORK_DIR/package-manager-called" ]; then
 else
     bad "T24 基础命令与包管理器全部隔离，不触达真实系统"
 fi
-
-echo "== T25 teamai：零超时被拒绝且不执行初始化 =="
-: > "$teamai_log"
-if env HOME="$WORK_DIR/teamai-home" PATH="$teamai_shim_dir:$PATH" \
-    TEAMAI_LOG="$teamai_log" TEAMAI_ATTEMPT_FILE="$WORK_DIR/teamai-attempt" \
-    TEAMAI_INIT_TIMEOUT=0 RETRY_MAX=1 RETRY_DELAY=0 \
-    bash "$SUT" teamai >/dev/null 2>&1; then
-    bad "T25 TEAMAI_INIT_TIMEOUT=0 应返回失败"
-else
-    ok "T25 TEAMAI_INIT_TIMEOUT=0 应返回失败"
-fi
-if [ ! -s "$teamai_log" ]; then ok "T25 非法超时不执行 teamai"; else bad "T25 非法超时不执行 teamai"; fi
 
 echo "== T26 bashrc 临时文件：Token 写入全过程保持 0600 =="
 chmod_shim_dir="$WORK_DIR/chmod-bin"
@@ -517,64 +497,15 @@ done
 echo "== T30 TeamAI URL：拒绝 userinfo 且不输出到命令日志 =="
 : > "$teamai_log"
 if env HOME="$WORK_DIR/teamai-home" PATH="$teamai_shim_dir:$PATH" \
-    TEAMAI_LOG="$teamai_log" TEAMAI_ATTEMPT_FILE="$WORK_DIR/teamai-attempt" \
+    TEAMAI_LOG="$teamai_log" \
     TEAMAI_REPO_URL='https://user:secret@github.com/org/repo' \
-    TEAMAI_INIT_TIMEOUT=5 RETRY_MAX=1 RETRY_DELAY=0 \
+    RETRY_MAX=1 RETRY_DELAY=0 \
     bash "$SUT" teamai >/dev/null 2>&1; then
     bad "T30 带 userinfo 的 TeamAI URL 应返回失败"
 else
     ok "T30 带 userinfo 的 TeamAI URL 应返回失败"
 fi
 if [ ! -s "$teamai_log" ]; then ok "T30 非法 URL 不执行也不记录初始化命令"; else bad "T30 非法 URL 不执行也不记录初始化命令"; fi
-
-echo "== T31 TeamAI：init 后不执行 status 验证 =="
-: > "$teamai_log"
-if env HOME="$WORK_DIR/teamai-home" PATH="$teamai_shim_dir:$PATH" \
-    TEAMAI_LOG="$teamai_log" TEAMAI_ATTEMPT_FILE="$WORK_DIR/teamai-attempt" \
-    TEAMAI_REPO_URL='https://git.example.com/team/custom.git' \
-    TEAMAI_EFFECTIVE_REPO_URL='https://github.com/killingwolf/aiwolfs.git' \
-    TEAMAI_LOG_STATUS=true TEAMAI_INIT_TIMEOUT=5 RETRY_MAX=1 RETRY_DELAY=0 \
-    bash "$SUT" teamai >"$WORK_DIR/t31.out" 2>&1; then
-    ok "T31 init 成功后直接返回，不读取 status"
-else
-    bad "T31 init 成功后直接返回，不读取 status"
-fi
-if grep -q 'status' "$teamai_log"; then
-    bad "T31 不调用 teamai status"
-else
-    ok "T31 不调用 teamai status"
-fi
-
-echo "== T32 TeamAI 超时：TERM 被忽略时杀死整个进程组 =="
-timeout_shim_dir="$WORK_DIR/timeout-bin"
-mkdir -p "$timeout_shim_dir"
-cp "$teamai_shim_dir/fnm" "$timeout_shim_dir/fnm"
-cat > "$timeout_shim_dir/teamai" <<'EOF'
-#!/bin/bash
-trap '' TERM
-bash -c 'trap "" TERM; while :; do sleep 1; done' &
-printf '%s\n' "$!" > "$TEAMAI_CHILD_FILE"
-while :; do sleep 1; done
-EOF
-chmod +x "$timeout_shim_dir/teamai" "$timeout_shim_dir/fnm"
-rm -f "$WORK_DIR/teamai-child.pid"
-if env HOME="$WORK_DIR/teamai-home" PATH="$timeout_shim_dir:$PATH" \
-    TEAMAI_CHILD_FILE="$WORK_DIR/teamai-child.pid" \
-    TEAMAI_INIT_TIMEOUT=1 TEAMAI_KILL_AFTER=1 RETRY_MAX=1 RETRY_DELAY=0 \
-    bash "$SUT" teamai >/dev/null 2>&1; then
-    bad "T32 忽略 TERM 的 TeamAI 应超时失败"
-else
-    ok "T32 忽略 TERM 的 TeamAI 应超时失败"
-fi
-child_pid="$(cat "$WORK_DIR/teamai-child.pid")"
-sleep 1
-child_state="$(ps -o stat= -p "$child_pid" 2>/dev/null || true)"
-if [ -z "$child_state" ] || [[ "$child_state" == Z* ]]; then
-    ok "T32 TeamAI 子进程未残留"
-else
-    bad "T32 TeamAI 子进程未残留"
-    kill -KILL "$child_pid" 2>/dev/null || true
-fi
 
 echo "== T33 bashrc 原子改名失败：保留原文件并清理临时文件 =="
 f="$WORK_DIR/t33.json"
