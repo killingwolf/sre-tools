@@ -45,9 +45,27 @@ cat > "$SHIM_DIR/apt-get" <<'EOF'
 echo "apt-get $*" >> "$SHIM_LOG"
 exit "${FAKE_APT_RC:-0}"
 EOF
-chmod +x "$SHIM_DIR/id" "$SHIM_DIR/usermod" "$SHIM_DIR/visudo" "$SHIM_DIR/apt-get"
+cat > "$SHIM_DIR/dnf" <<'EOF'
+#!/bin/bash
+echo "dnf $*" >> "$SHIM_LOG"
+if [ "${1:-}" = "install" ]; then
+    if [ "${!#}" = "gh" ]; then exit "${FAKE_GH_INSTALL_RC:-0}"; fi
+    exit "${FAKE_CORE_INSTALL_RC:-0}"
+fi
+EOF
+cat > "$SHIM_DIR/yum" <<'EOF'
+#!/bin/bash
+echo "yum $*" >> "$SHIM_LOG"
+if [ "${1:-}" = "install" ]; then
+    if [ "${!#}" = "gh" ]; then exit "${FAKE_GH_INSTALL_RC:-0}"; fi
+    exit "${FAKE_CORE_INSTALL_RC:-0}"
+fi
+EOF
+chmod +x "$SHIM_DIR/id" "$SHIM_DIR/usermod" "$SHIM_DIR/visudo" "$SHIM_DIR/apt-get" \
+    "$SHIM_DIR/dnf" "$SHIM_DIR/yum"
 export PATH="$SHIM_DIR:$PATH"
 export FAKE_UID=0 FAKE_GROUPS="" FAKE_USER_EXISTS=true FAKE_VISUDO_RC=0 FAKE_USERMOD_RC=0 FAKE_APT_RC=0
+export FAKE_CORE_INSTALL_RC=0 FAKE_GH_INSTALL_RC=0
 
 # ── 被测脚本的路径变量全部指向临时目录；重试调快 ──
 export SUDOERS_DIR="$WORK_DIR/sudoers.d"
@@ -120,6 +138,65 @@ if [ -n "$bak" ] && [ "$(cat "$bak")" = "line2" ]; then ok "W5 删除前备份�
 r=$(remove_managed_file "$f")
 check "W6 不存在输出 absent" [ "$r" = "absent" ]
 
+echo "== W7 备份失败：禁止覆盖或删除原文件 =="
+f="$WORK_DIR/w7.conf"
+write_managed_file "$f" "original" 0440 >/dev/null
+before="$(cat "$f")"
+cp_shim_dir="$WORK_DIR/cp-bin"
+mkdir -p "$cp_shim_dir"
+cat > "$cp_shim_dir/cp" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+chmod +x "$cp_shim_dir/cp"
+old_path="$PATH"
+PATH="$cp_shim_dir:$PATH"
+if write_managed_file "$f" "replacement" 0440 >/dev/null 2>&1; then
+    bad "W7 备份失败时写入应返回非零"
+else
+    ok "W7 备份失败时写入应返回非零"
+fi
+assert_content "$f" "$before" "W7 备份失败不覆盖原文件"
+if remove_managed_file "$f" >/dev/null 2>&1; then
+    bad "W7 备份失败时删除应返回非零"
+else
+    ok "W7 备份失败时删除应返回非零"
+fi
+assert_content "$f" "$before" "W7 备份失败不删除原文件"
+PATH="$old_path"
+check "W7 临时文件已清理" bash -c "! ls '$f'.tmp.* >/dev/null 2>&1"
+
+echo "== W8 setup 完整调用链：撤销 NOPASSWD 时备份失败必须中止 =="
+TARGET_USER=alice SUDO_NOPASSWD=true FAKE_GROUPS="alice wheel"
+configure_sudo alice >/dev/null 2>&1
+dropin="$SUDOERS_DIR/alice"
+before="$(cat "$dropin")"
+PATH="$cp_shim_dir:$PATH"
+if env PATH="$PATH" TARGET_USER=alice SUDO_NOPASSWD=false OPTIONAL_PACKAGES="" \
+    ENABLE_IP_FORWARD=false RETRY_MAX=1 RETRY_DELAY=0 bash "$SUT" setup >/dev/null 2>&1; then
+    bad "W8 备份失败时 setup 应返回非零"
+else
+    ok "W8 备份失败时 setup 应返回非零"
+fi
+PATH="$old_path"
+assert_content "$dropin" "$before" "W8 失败后 NOPASSWD drop-in 保持原样"
+TARGET_USER="" SUDO_NOPASSWD=true
+rm -f "$dropin"
+
+echo "== W9 setup 完整调用链：sysctl 删除备份失败必须中止 =="
+printf '%s\n' 'net.ipv4.ip_forward = 1' > "$SYSCTL_FILE"
+before="$(cat "$SYSCTL_FILE")"
+PATH="$cp_shim_dir:$PATH"
+if env PATH="$PATH" TARGET_USER="" OPTIONAL_PACKAGES="" \
+    ENABLE_IP_FORWARD=false RETRY_MAX=1 RETRY_DELAY=0 bash "$SUT" setup >/dev/null 2>&1; then
+    bad "W9 sysctl 备份失败时 setup 应返回非零"
+else
+    ok "W9 sysctl 备份失败时 setup 应返回非零"
+fi
+PATH="$old_path"
+assert_content "$SYSCTL_FILE" "$before" "W9 失败后 sysctl 文件保持原样"
+rm -f "$SYSCTL_FILE"
+
 echo "== P 用户枚举与交互选择 =="
 out=$(list_regular_users)
 check "P1 枚举 UID>=1000 且排除 nologin/nobody" [ "$out" = "alice
@@ -191,6 +268,39 @@ configure_sudo_targets <<< "y
 y" >/dev/null 2>&1
 check "T2 交互选两人均配置 drop-in" bash -c "[ -f '$SUDOERS_DIR/alice' ] && [ -f '$SUDOERS_DIR/bob' ]"
 is_interactive() { return 1; }
+
+echo "== G1 setup 公共入口：gh 独立安装且不配置 EPEL =="
+reset_log
+env -u CORE_PACKAGES TARGET_USER="" OPTIONAL_PACKAGES="" ENABLE_IP_FORWARD=false \
+    bash "$SUT" setup >/dev/null 2>&1
+check "G1 apt-get 单独安装 gh" grep -Eq "apt-get install .* gh$" "$SHIM_LOG"
+check "G1 不查询或配置 EPEL" bash -c "! grep -Eq 'repolist|epel-release' '$SHIM_LOG'"
+
+echo "== G2 dnf：gh 独立安装且不配置 EPEL =="
+reset_log
+FAKE_CORE_INSTALL_RC=0 FAKE_GH_INSTALL_RC=0
+env PKG_MGR_OVERRIDE=dnf TARGET_USER="" OPTIONAL_PACKAGES="" \
+    ENABLE_IP_FORWARD=false bash "$SUT" setup >/dev/null 2>&1
+check "G2 dnf 单独安装 gh" grep -Eq "dnf install .* gh$" "$SHIM_LOG"
+check "G2 不查询或配置 EPEL" bash -c "! grep -Eq 'repolist|epel-release' '$SHIM_LOG'"
+
+echo "== G3 gh 安装失败：仅警告，setup 继续成功 =="
+reset_log
+FAKE_GH_INSTALL_RC=1
+out=$(env PKG_MGR_OVERRIDE=dnf TARGET_USER="" OPTIONAL_PACKAGES="" \
+    ENABLE_IP_FORWARD=false RETRY_MAX=1 RETRY_DELAY=0 bash "$SUT" setup 2>&1)
+rc=$?
+check "G3 gh 失败不阻断 setup" [ "$rc" -eq 0 ]
+case "$out" in *gh*失败*) ok "G3 输出 gh 安装失败警告";; *) bad "G3 输出 gh 安装失败警告";; esac
+case "$out" in *系统初始化完成*) ok "G3 后续初始化仍完成";; *) bad "G3 后续初始化仍完成";; esac
+FAKE_GH_INSTALL_RC=0
+
+echo "== G4 yum：gh 独立安装且不配置 EPEL =="
+reset_log
+env PKG_MGR_OVERRIDE=yum TARGET_USER="" OPTIONAL_PACKAGES="" \
+    ENABLE_IP_FORWARD=false bash "$SUT" setup >/dev/null 2>&1
+check "G4 yum 单独安装 gh" grep -Eq "yum install .* gh$" "$SHIM_LOG"
+check "G4 不查询或配置 EPEL" bash -c "! grep -Eq 'repolist|epel-release' '$SHIM_LOG'"
 
 echo "== O install_optional_packages：默认空 / 按需安装 / 失败降级 =="
 PKG_MGR=apt-get

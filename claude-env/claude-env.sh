@@ -4,8 +4,9 @@
 #       最新 LTS 版 node，并通过 npm 安装 Claude Code 等全局工具
 #
 # 使用方式：
-#   初始化：./claude-env.sh setup    # 幂等，可重复执行，已装组件自动跳过
+#   初始化：./claude-env.sh setup    # 安装 + TeamAI 用户级初始化 + Claude/Anthropic 配置
 #   状态：  ./claude-env.sh show     # 查看各组件版本 / 安装状态
+#   TeamAI：./claude-env.sh teamai   # 单独初始化（TEAMAI_REPO_URL 可覆盖默认仓库）
 #
 #   网络重试与镜像均可用环境变量覆盖（RETRY_MAX / RETRY_DELAY / FNM_INSTALL_URL /
 #   UV_INSTALL_URL / NPM_CONFIG_REGISTRY / FNM_NODE_DIST_MIRROR 等），详见 README
@@ -16,6 +17,11 @@ set -E    # 让 ERR trap 在函数内部也生效
 trap 'echo "[!] 脚本在第 $LINENO 行失败：$BASH_COMMAND"' ERR
 
 # ─── 配置区（均支持环境变量覆盖，便于切换镜像 / 调整重试参数） ───
+# 在任何第三方命令运行前保存并取消导出敏感环境值，避免安装器/npm/TeamAI 子进程继承
+ANTHROPIC_AUTH_TOKEN_VALUE="${ANTHROPIC_AUTH_TOKEN-}"
+ANTHROPIC_BASE_URL_VALUE="${ANTHROPIC_BASE_URL-}"
+export -n ANTHROPIC_AUTH_TOKEN_VALUE ANTHROPIC_BASE_URL_VALUE
+unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
 FNM_INSTALL_URL="${FNM_INSTALL_URL:-https://fnm.vercel.app/install}"    # fnm 官方安装脚本
 UV_INSTALL_URL="${UV_INSTALL_URL:-https://astral.sh/uv/install.sh}"     # uv 官方安装脚本
 # node 发行包下载镜像（fnm 原生支持的环境变量），默认阿里云；覆盖为 https://nodejs.org/dist 可回官方源
@@ -24,10 +30,18 @@ NPM_TOOLS=(                                         # npm 全局工具，按需�
     "@anthropic-ai/claude-code"
     "teamai-cli"
 )
+TEAMAI_REPO_URL="${TEAMAI_REPO_URL:-https://github.com/killingwolf/aiwolfs}"  # TeamAI 团队仓库完整 URL
+TEAMAI_INIT_TIMEOUT="${TEAMAI_INIT_TIMEOUT:-300}"                  # teamai init 单次执行超时秒数（含交互时间）
+TEAMAI_KILL_AFTER="${TEAMAI_KILL_AFTER:-10}"                       # TERM 后等待多久发送 KILL（秒）
+ALLOW_INSECURE_HTTP_URLS="${ALLOW_INSECURE_HTTP_URLS:-false}"      # true 才允许明文 HTTP（默认仅 HTTPS；不推荐）
+DOWNLOAD_MAX_TIME="${DOWNLOAD_MAX_TIME:-120}"                     # curl 单次下载总超时（正整数秒）
 CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"  # Claude Code 用户级配置（bypassPermissions 仅在用户级/托管设置生效）
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"   # 默认权限模式：default / acceptEdits / plan / bypassPermissions / auto
 CLAUDE_SKIP_DANGEROUS_PROMPT="${CLAUDE_SKIP_DANGEROUS_PROMPT:-true}"    # 跳过 bypassPermissions 启动时的危险模式确认弹窗（顶层键 skipDangerousModePermissionPrompt）：true / false
 CLAUDE_CONFIG_FILE="${CLAUDE_CONFIG_FILE:-$HOME/.claude.json}"          # Claude Code 全局状态文件（hasCompletedOnboarding 与登录态/项目历史同文件，合并保留其他键）
+BASHRC_FILE="${BASHRC_FILE:-$HOME/.bashrc}"                            # Anthropic API 环境变量写入位置（离线测试可指向临时文件）
+ANTHROPIC_ENV_BEGIN="# >>> claude-env anthropic >>>"                  # 受管环境变量块起始标记
+ANTHROPIC_ENV_END="# <<< claude-env anthropic <<<"                    # 受管环境变量块结束标记
 CLAUDE_SKIP_ONBOARDING="${CLAUDE_SKIP_ONBOARDING:-true}"                # 标记 onboarding 已完成（.claude.json 顶层键 hasCompletedOnboarding），跳过首次启动引导：true / false
 RETRY_MAX="${RETRY_MAX:-3}"                         # 网络操作最多尝试次数（含首次）
 RETRY_DELAY="${RETRY_DELAY:-5}"                     # 失败后首次退避秒数，逐次翻倍
@@ -48,9 +62,44 @@ retry() {
     done
 }
 
+# ─── 正整数配置校验 ───
+validate_positive_int() {
+    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
+}
+
+# ─── URL 边界：默认 HTTPS；拒绝空主机、userinfo、query/fragment 与控制字符 ───
+validate_http_url() {
+    local url="$1" rest pattern
+    case "$url" in
+        https://*) rest="${url#https://}" ;;
+        http://*)
+            if [ "$ALLOW_INSECURE_HTTP_URLS" != "true" ]; then return 1; fi
+            echo "[!] 警告：ALLOW_INSECURE_HTTP_URLS=true，明文 HTTP 可能泄露凭据"
+            rest="${url#http://}"
+            ;;
+        *) return 1 ;;
+    esac
+    pattern='^[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~@:%+=-]*)*$'
+    [[ "$rest" =~ $pattern ]]
+}
+
 # ─── 下载文件（curl 自带超时+底层重试；下载与执行分离，避免管道直跑半截脚本） ───
 download() {  # download <URL> <输出文件>
-    curl -fsSL --connect-timeout 10 --retry 3 --retry-delay 2 "$1" -o "$2"
+    if ! validate_positive_int "$DOWNLOAD_MAX_TIME"; then
+        echo "[!] DOWNLOAD_MAX_TIME 必须是正整数秒：$DOWNLOAD_MAX_TIME"
+        return 1
+    fi
+    if ! validate_http_url "$1"; then
+        echo "[!] 下载 URL 须为有效 HTTPS 地址且不得含 userinfo/query/fragment；内网 HTTP 须显式设 ALLOW_INSECURE_HTTP_URLS=true"
+        return 1
+    fi
+    local protocols="https"
+    if [ "$ALLOW_INSECURE_HTTP_URLS" = "true" ]; then
+        protocols="http,https"
+    fi
+    curl -fsSL --connect-timeout 10 --max-time "$DOWNLOAD_MAX_TIME" \
+        --retry 3 --retry-delay 2 \
+        --proto "=$protocols" --proto-redir "=$protocols" "$1" -o "$2"
 }
 
 # ─── 加载本地安装目录与 fnm 环境（让当前脚本进程立即可用） ───
@@ -231,6 +280,28 @@ install_npm_tools() {
     done
 }
 
+# ─── 初始化 TeamAI 用户级配置（默认仓库可用 TEAMAI_REPO_URL 覆盖） ───
+init_teamai() {
+    if ! command -v teamai &>/dev/null; then
+        echo "[!] 未找到 teamai，请先执行：$0 setup"
+        return 1
+    fi
+    if ! validate_http_url "$TEAMAI_REPO_URL"; then
+        echo "[!] TEAMAI_REPO_URL 须为含主机和路径的有效 HTTPS URL，不得含 userinfo/query/fragment；内网 HTTP 须显式设 ALLOW_INSECURE_HTTP_URLS=true"
+        return 1
+    fi
+    if ! validate_positive_int "$TEAMAI_INIT_TIMEOUT" || ! validate_positive_int "$TEAMAI_KILL_AFTER"; then
+        echo "[!] TEAMAI_INIT_TIMEOUT 与 TEAMAI_KILL_AFTER 必须是正整数秒"
+        return 1
+    fi
+    if ! retry timeout --kill-after="${TEAMAI_KILL_AFTER}s" "${TEAMAI_INIT_TIMEOUT}s" \
+        teamai init "$TEAMAI_REPO_URL" --scope user; then
+        echo "[!] TeamAI 初始化失败（仓库：$TEAMAI_REPO_URL）；可检查 GitHub 登录与仓库权限后执行：$0 teamai"
+        return 1
+    fi
+    echo "[+] TeamAI 用户级初始化完成：$TEAMAI_REPO_URL"
+}
+
 # ─── 通用 JSON 合并：把 patch 深合并进目标文件，stdout 输出 skip / updated ───
 # 保留其他键；已有值与 patch 类型冲突时报错且不动原文件；幂等（达标即 skip）；
 # 覆盖前带时间戳备份；临时文件 + 原子改名；备份与写入均继承原文件权限位
@@ -291,7 +362,7 @@ merge_json() { # merge_json <file> <patch-json>
     echo "$result"
 }
 
-# ─── 配置 Claude Code（settings.json 权限 + .claude.json onboarding 标记） ───
+# ─── 配置 Claude Code（settings.json + onboarding）与 .bashrc Anthropic 环境变量 ───
 configure_claude() {
     # 校验全部取值，先于任何文件写入（非法值 → 两个文件零改动）
     case "$CLAUDE_PERMISSION_MODE" in
@@ -317,6 +388,105 @@ configure_claude() {
     esac
     configure_settings
     configure_onboarding
+    configure_anthropic_env
+}
+
+# ─── 写入前校验：不替换符号链接；受管块必须成对且最多一个 ───
+validate_bashrc() {
+    if [ -L "$BASHRC_FILE" ]; then
+        echo "[!] $BASHRC_FILE 是符号链接，为避免破坏链接关系已停止；请将 BASHRC_FILE 指向实际文件"
+        return 1
+    fi
+    if [ ! -f "$BASHRC_FILE" ]; then
+        return 0
+    fi
+    if ! awk -v begin="$ANTHROPIC_ENV_BEGIN" -v end="$ANTHROPIC_ENV_END" '
+        $0 == begin { begins++; if (in_block || begins > 1) bad = 1; in_block = 1; next }
+        $0 == end { ends++; if (!in_block || ends > 1) bad = 1; in_block = 0; next }
+        END { if (bad || in_block || begins != ends) exit 1 }
+    ' "$BASHRC_FILE"; then
+        echo "[!] $BASHRC_FILE 的 claude-env 受管块缺失、重复或标记不配对，原文件未修改"
+        return 1
+    fi
+}
+
+# ─── .bashrc：写入 Anthropic API 环境变量（不输出 Token） ───
+configure_anthropic_env() {
+    validate_bashrc || return 1
+    local replace=false
+    if [ -f "$BASHRC_FILE" ] && {
+        grep -Fq "$ANTHROPIC_ENV_BEGIN" "$BASHRC_FILE" ||
+        grep -Eq '^[[:space:]]*(export[[:space:]]+)?ANTHROPIC_(BASE_URL|AUTH_TOKEN)[[:space:]]*=' "$BASHRC_FILE"
+    }; then
+        local answer=""
+        echo "[*] $BASHRC_FILE 中已配置 Anthropic 环境变量"
+        read -r -p "是否修改？[y/N] " answer || answer=""
+        case "$answer" in
+            y|Y|yes|YES) replace=true ;;
+            *) echo "[*] 保留现有 Anthropic 环境变量，跳过"; return 0 ;;
+        esac
+    fi
+
+    local base_url="$ANTHROPIC_BASE_URL_VALUE" auth_token="$ANTHROPIC_AUTH_TOKEN_VALUE" input=""
+    if [ "$replace" = "true" ] || [ -z "$base_url" ]; then
+        read -r -p "请输入 ANTHROPIC_BASE_URL（https://...）：" input || input=""
+        if [ -n "$input" ]; then base_url="$input"; fi
+    fi
+    input=""
+    if [ "$replace" = "true" ] || [ -z "$auth_token" ]; then
+        read -r -s -p "请输入 ANTHROPIC_AUTH_TOKEN（不回显${auth_token:+，回车保留当前值}）：" input || input=""
+        echo ""
+        if [ -n "$input" ]; then auth_token="$input"; fi
+    fi
+    if [ -z "$base_url" ] || [ -z "$auth_token" ]; then
+        echo "[*] 未同时提供 ANTHROPIC_BASE_URL 与 ANTHROPIC_AUTH_TOKEN，跳过 .bashrc 配置"
+        return 0
+    fi
+    if ! validate_http_url "$base_url"; then
+        echo "[!] ANTHROPIC_BASE_URL 须为含主机的有效 HTTPS URL，不得含 userinfo/query/fragment；本机或内网 HTTP 须显式设 ALLOW_INSECURE_HTTP_URLS=true"
+        return 1
+    fi
+
+    write_anthropic_bashrc "$base_url" "$auth_token"
+}
+
+# ─── 备份并原子安装受管块；临时文件从创建到写入始终为 0600 ───
+write_anthropic_bashrc() {
+    local base_url="$1" auth_token="$2" tmp backup
+    mkdir -p "$(dirname "$BASHRC_FILE")"
+    tmp=$(mktemp "${BASHRC_FILE}.tmp.XXXXXX")
+    trap "rm -f -- $(printf '%q' "$tmp")" EXIT
+
+    if [ -f "$BASHRC_FILE" ] && ! awk -v begin="$ANTHROPIC_ENV_BEGIN" -v end="$ANTHROPIC_ENV_END" '
+        $0 == begin { skipping = 1; next }
+        skipping { if ($0 == end) skipping = 0; next }
+        /^[[:space:]]*(export[[:space:]]+)?ANTHROPIC_(BASE_URL|AUTH_TOKEN)[[:space:]]*=/ { next }
+        { print }
+    ' "$BASHRC_FILE" > "$tmp"; then
+        rm -f "$tmp"
+        trap - EXIT
+        return 1
+    fi
+    if ! {
+        printf '\n%s\n' "$ANTHROPIC_ENV_BEGIN"
+        printf 'export ANTHROPIC_BASE_URL=%q\n' "$base_url"
+        printf 'export ANTHROPIC_AUTH_TOKEN=%q\n' "$auth_token"
+        printf '%s\n' "$ANTHROPIC_ENV_END"
+    } >> "$tmp"; then
+        rm -f "$tmp"
+        trap - EXIT
+        return 1
+    fi
+    chmod 600 "$tmp"
+
+    if [ -f "$BASHRC_FILE" ]; then
+        backup="$BASHRC_FILE.bak.$(date -u +%Y-%m-%dT%H-%M-%S-%3NZ)"
+        (umask 077; cp "$BASHRC_FILE" "$backup")
+        chmod 600 "$backup"
+    fi
+    mv -f "$tmp" "$BASHRC_FILE"
+    trap - EXIT
+    echo "[+] 已将 ANTHROPIC_BASE_URL 与 ANTHROPIC_AUTH_TOKEN 写入 $BASHRC_FILE（Token 未回显）"
 }
 
 # ─── settings.json：permissions.defaultMode + skipDangerousModePermissionPrompt ───
@@ -506,6 +676,7 @@ case "${1:-}" in
         load_fnm_env              # fnm 就绪后加载其 shell 环境
         install_node
         install_npm_tools
+        init_teamai
         configure_claude
         banner
         ;;
@@ -517,10 +688,15 @@ case "${1:-}" in
         load_fnm_env 2>/dev/null || true
         show
         ;;
+    teamai)
+        load_fnm_env
+        init_teamai
+        ;;
     *)
         echo "用法："
-        echo "  $0 setup    # 初始化安装（fnm / uv / node LTS / Claude Code / 权限配置），幂等可重复执行"
-        echo "  $0 config   # 仅重写 Claude Code 配置（settings.json 权限 + .claude.json onboarding 标记），不执行安装"
+        echo "  $0 setup    # 初始化安装（fnm / uv / node LTS / Claude Code / TeamAI / 环境变量与权限配置），幂等可重复执行"
+        echo "  $0 config   # 仅重写 Claude Code 配置与 .bashrc Anthropic 环境变量，不执行安装或 TeamAI 初始化"
         echo "  $0 show     # 查看各组件版本 / 安装状态"
+        echo "  $0 teamai   # 初始化 TeamAI 用户级配置（TEAMAI_REPO_URL 可覆盖仓库地址）"
         ;;
 esac
