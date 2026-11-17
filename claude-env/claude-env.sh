@@ -4,9 +4,9 @@
 #       最新 LTS 版 node，并通过 npm 安装 Claude Code 等全局工具
 #
 # 使用方式：
-#   初始化：./claude-env.sh setup    # 安装 + TeamAI 用户级初始化 + Claude/Anthropic 配置
+#   初始化：./claude-env.sh setup    # 安装 + Claude/Anthropic 配置 + TeamAI 手动命令提示
 #   状态：  ./claude-env.sh show     # 查看各组件版本 / 安装状态
-#   TeamAI：./claude-env.sh teamai   # 单独初始化（TEAMAI_REPO_URL 可覆盖默认仓库）
+#   TeamAI：./claude-env.sh teamai   # 仅打印手动初始化命令（TEAMAI_REPO_URL 可覆盖）
 #
 #   网络重试与镜像均可用环境变量覆盖（RETRY_MAX / RETRY_DELAY / FNM_INSTALL_URL /
 #   UV_INSTALL_URL / NPM_CONFIG_REGISTRY / FNM_NODE_DIST_MIRROR 等），详见 README
@@ -30,9 +30,7 @@ NPM_TOOLS=(                                         # npm 全局工具，按需�
     "@anthropic-ai/claude-code"
     "teamai-cli"
 )
-TEAMAI_REPO_URL="${TEAMAI_REPO_URL:-https://github.com/killingwolf/aiwolfs}"  # TeamAI 团队仓库完整 URL
-TEAMAI_INIT_TIMEOUT="${TEAMAI_INIT_TIMEOUT:-300}"                  # teamai init 单次执行超时秒数（含交互时间）
-TEAMAI_KILL_AFTER="${TEAMAI_KILL_AFTER:-10}"                       # TERM 后等待多久发送 KILL（秒）
+TEAMAI_REPO_URL="${TEAMAI_REPO_URL:-https://github.com/killingwolf/aiwolfs}"  # TeamAI 团队仓库完整 URL（仅用于手动命令提示）
 ALLOW_INSECURE_HTTP_URLS="${ALLOW_INSECURE_HTTP_URLS:-false}"      # true 才允许明文 HTTP（默认仅 HTTPS；不推荐）
 DOWNLOAD_MAX_TIME="${DOWNLOAD_MAX_TIME:-120}"                     # curl 单次下载总超时（正整数秒）
 CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"  # Claude Code 用户级配置（bypassPermissions 仅在用户级/托管设置生效）
@@ -280,26 +278,14 @@ install_npm_tools() {
     done
 }
 
-# ─── 初始化 TeamAI 用户级配置（默认仓库可用 TEAMAI_REPO_URL 覆盖） ───
-init_teamai() {
-    if ! command -v teamai &>/dev/null; then
-        echo "[!] 未找到 teamai，请先执行：$0 setup"
-        return 1
-    fi
+# ─── 输出 TeamAI 手动初始化提示，避免 setup 进入交互式 teamai init ───
+print_teamai_hint() {
     if ! validate_http_url "$TEAMAI_REPO_URL"; then
         echo "[!] TEAMAI_REPO_URL 须为含主机和路径的有效 HTTPS URL，不得含 userinfo/query/fragment；内网 HTTP 须显式设 ALLOW_INSECURE_HTTP_URLS=true"
         return 1
     fi
-    if ! validate_positive_int "$TEAMAI_INIT_TIMEOUT" || ! validate_positive_int "$TEAMAI_KILL_AFTER"; then
-        echo "[!] TEAMAI_INIT_TIMEOUT 与 TEAMAI_KILL_AFTER 必须是正整数秒"
-        return 1
-    fi
-    if ! retry timeout --kill-after="${TEAMAI_KILL_AFTER}s" "${TEAMAI_INIT_TIMEOUT}s" \
-        teamai init "$TEAMAI_REPO_URL" --scope user; then
-        echo "[!] TeamAI 初始化失败（仓库：$TEAMAI_REPO_URL）；可检查 GitHub 登录与仓库权限后执行：$0 teamai"
-        return 1
-    fi
-    echo "[+] TeamAI 用户级初始化完成：$TEAMAI_REPO_URL"
+    printf '[*] TeamAI 初始化需要交互，已跳过自动执行。请手动运行：\n'
+    printf '    teamai init %q --scope user\n' "$TEAMAI_REPO_URL"
 }
 
 # ─── 通用 JSON 合并：把 patch 深合并进目标文件，stdout 输出 skip / updated ───
@@ -662,7 +648,10 @@ banner() {
     echo "  下一步："
     echo "    1. source ~/.bashrc        # 或新开一个终端"
     echo "    2. claude --version        # 验证安装"
-    echo "    3. claude -p hi                 # 首次运行，按浏览器提示登录"
+    echo ""
+    print_teamai_hint
+    echo ""
+    echo "    3. claude -p hi               # 首次运行，按浏览器提示登录"
     echo "==========================================="
 }
 
@@ -676,7 +665,6 @@ case "${1:-}" in
         load_fnm_env              # fnm 就绪后加载其 shell 环境
         install_node
         install_npm_tools
-        init_teamai
         configure_claude
         banner
         ;;
@@ -689,14 +677,13 @@ case "${1:-}" in
         show
         ;;
     teamai)
-        load_fnm_env
-        init_teamai
+        print_teamai_hint
         ;;
     *)
         echo "用法："
-        echo "  $0 setup    # 初始化安装（fnm / uv / node LTS / Claude Code / TeamAI / 环境变量与权限配置），幂等可重复执行"
+        echo "  $0 setup    # 初始化安装（fnm / uv / node LTS / Claude Code / 环境变量与权限配置），并提示 TeamAI 手动命令"
         echo "  $0 config   # 仅重写 Claude Code 配置与 .bashrc Anthropic 环境变量，不执行安装或 TeamAI 初始化"
         echo "  $0 show     # 查看各组件版本 / 安装状态"
-        echo "  $0 teamai   # 初始化 TeamAI 用户级配置（TEAMAI_REPO_URL 可覆盖仓库地址）"
+        echo "  $0 teamai   # 仅打印 TeamAI 手动初始化命令（TEAMAI_REPO_URL 可覆盖）"
         ;;
 esac

@@ -1,6 +1,6 @@
 # Claude 开发环境初始化
 
-在新机器上一键安装 Claude Code 的开发依赖：**fnm**（Node 版本管理）、**uv**（Python 项目管理）、最新 **LTS Node.js**（发行包默认走阿里云镜像），通过 npm 全局安装 **Claude Code** 与 **teamai-cli**。安装完成后自动执行 `teamai init <团队仓库 URL> --scope user`（默认仓库 `https://github.com/killingwolf/aiwolfs`，可用 `TEAMAI_REPO_URL` 覆盖），并将用户提供的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 写入 `~/.bashrc`。同时写入 Claude Code 配置：用户级 `~/.claude/settings.json` 写入 `permissions.defaultMode: bypassPermissions`（工具操作不再询问确认）与 `skipDangerousModePermissionPrompt: true`（跳过 bypass 模式启动时的危险模式确认弹窗）；全局状态文件 `~/.claude.json` 写入 `hasCompletedOnboarding: true`（跳过首次启动引导，保留登录态/项目历史等其他键）。脚本幂等，可重复执行。
+在新机器上一键安装 Claude Code 的开发依赖：**fnm**（Node 版本管理）、**uv**（Python 项目管理）、最新 **LTS Node.js**（发行包默认走阿里云镜像），通过 npm 全局安装 **Claude Code** 与 **teamai-cli**。安装完成后**不自动执行** `teamai init`，而是在 `claude -p hi` 启动提示前输出需要用户手动执行的命令（默认仓库 `https://github.com/killingwolf/aiwolfs`，可用 `TEAMAI_REPO_URL` 覆盖），避免脚本进入 TeamAI 交互流程。脚本将用户提供的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 写入 `~/.bashrc`。同时写入 Claude Code 配置：用户级 `~/.claude/settings.json` 写入 `permissions.defaultMode: bypassPermissions`（工具操作不再询问确认）与 `skipDangerousModePermissionPrompt: true`（跳过 bypass 模式启动时的危险模式确认弹窗）；全局状态文件 `~/.claude.json` 写入 `hasCompletedOnboarding: true`（跳过首次启动引导，保留登录态/项目历史等其他键）。脚本幂等，可重复执行。
 
 ```
 ./claude-env.sh setup
@@ -9,11 +9,11 @@
       ├─ 2. uv      python 项目管理器 → ~/.local/bin
       ├─ 3. node    fnm install --lts（最新 LTS，默认从阿里云镜像下载）
       ├─ 4. npm     全局工具：@anthropic-ai/claude-code、teamai-cli
-      ├─ 5. teamai  init <TEAMAI_REPO_URL> --scope user（依据 init 退出码，不额外执行 status）
-      └─ 6. 配置    ~/.bashrc → ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN（交互输入）
-                     ~/.claude/settings.json → permissions.defaultMode: bypassPermissions
-                     + skipDangerousModePermissionPrompt: true（顶层键）
-                     ~/.claude.json → hasCompletedOnboarding: true（保留其他键）
+      ├─ 5. 配置    ~/.bashrc → ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN（交互输入）
+      │              ~/.claude/settings.json → permissions.defaultMode: bypassPermissions
+      │              + skipDangerousModePermissionPrompt: true（顶层键）
+      │              ~/.claude.json → hasCompletedOnboarding: true（保留其他键）
+      └─ 6. teamai  仅提示手动 init 命令（不自动执行，提示位于 claude -p hi 之前）
 ```
 
 ## 快速开始
@@ -42,23 +42,23 @@ node --version      # 应为最新 LTS
 uv --version
 claude --version
 teamai --version
-teamai status        # 应为用户级 scope 与所配置的团队仓库
+teamai status        # 手动完成 TeamAI init 后，验证 user scope 与所配置仓库
 printf 'ANTHROPIC_BASE_URL=%s\n' "$ANTHROPIC_BASE_URL"
 test -n "$ANTHROPIC_AUTH_TOKEN" && echo "ANTHROPIC_AUTH_TOKEN 已配置（不输出值）"
 cat ~/.claude/settings.json   # defaultMode 应为 bypassPermissions，skipDangerousModePermissionPrompt 应为 true
 cat ~/.claude.json            # hasCompletedOnboarding 应为 true（登录态等其他键保留）
-claude              # 首次运行，按浏览器提示登录
+claude -p hi       # 首次运行，按浏览器提示登录
 ```
 
 ## 常用命令
 
 | 命令 | 说明 |
 |------|------|
-| `./claude-env.sh setup` | 初始化安装全部组件 + TeamAI 用户级初始化 + 写入权限与 Anthropic 环境变量配置（可重复执行） |
+| `./claude-env.sh setup` | 初始化安装全部组件 + 写入权限与 Anthropic 环境变量配置 + 输出 TeamAI 手动命令（可重复执行） |
 | `./claude-env.sh config` | 仅重写 Claude Code 配置与 `.bashrc` Anthropic 环境变量，不执行安装或 TeamAI 初始化 |
-| `./claude-env.sh teamai` | 单独执行 `teamai init "$TEAMAI_REPO_URL" --scope user`，用于改仓库或失败重试；不额外执行 status |
+| `./claude-env.sh teamai` | 仅打印 `teamai init "$TEAMAI_REPO_URL" --scope user` 手动命令，不执行 TeamAI |
 | `./claude-env.sh show` | 查看各组件版本 / 安装状态、权限模式、onboarding 标记及 npm 全局包 |
-| `./test-claude-env.sh` | 离线回归测试权限、环境变量及 TeamAI 初始化逻辑（临时目录 + shim，不触碰真实配置） |
+| `./test-claude-env.sh` | 离线回归测试权限、环境变量及 TeamAI 手动提示逻辑（临时目录 + shim，不触碰真实配置） |
 
 ## 配置变量
 
@@ -74,8 +74,6 @@ claude              # 首次运行，按浏览器提示登录
 | `ANTHROPIC_AUTH_TOKEN` | `空` | Anthropic API Token；空时交互询问且不回显，也可通过环境变量提供；运行安装器前会从子进程环境移除 |
 | `BASHRC_FILE` | `~/.bashrc` | Anthropic 环境变量写入文件；已有变量时默认保留，确认修改前自动备份；符号链接会被拒绝 |
 | `TEAMAI_REPO_URL` | `https://github.com/killingwolf/aiwolfs` | TeamAI 团队仓库完整 HTTPS URL，不得含 userinfo/query/fragment |
-| `TEAMAI_INIT_TIMEOUT` | `300` | `teamai init` 单次执行超时（正整数秒，包含交互时间），失败按通用重试策略重试 |
-| `TEAMAI_KILL_AFTER` | `10` | 超时发送 TERM 后，等待多少秒向整个进程组发送 KILL（正整数） |
 | `DOWNLOAD_MAX_TIME` | `120` | curl 单次下载总超时（正整数秒）；与 10 秒连接超时、有限重试共同生效 |
 | `ALLOW_INSECURE_HTTP_URLS` | `false` | `true` 才允许上述两个 URL 使用明文 HTTP，并输出凭据泄露警告；仅限可信内网/本机 |
 | `CLAUDE_SETTINGS_FILE` | `~/.claude/settings.json` | Claude Code 用户级配置文件路径 |
@@ -101,7 +99,7 @@ export UV_INSTALL_URL="<内网镜像的 uv 安装脚本地址>"
 
 ```bash
 TEAMAI_REPO_URL="https://git.example.com/your-org/your-team.git" ./claude-env.sh setup
-# 已安装工具时，只重新初始化 TeamAI：
+# 仅查看对应的手动初始化命令，不执行 TeamAI：
 TEAMAI_REPO_URL="https://git.example.com/your-org/your-team.git" ./claude-env.sh teamai
 ```
 
@@ -119,5 +117,5 @@ TEAMAI_REPO_URL="https://git.example.com/your-org/your-team.git" ./claude-env.sh
 10. `hasCompletedOnboarding: true` 只跳过首次启动引导，**不替代登录**，首次运行 `claude` 仍需按提示完成认证（见步骤 3）；要恢复引导时设 `CLAUDE_SKIP_ONBOARDING=false` 后执行 `./claude-env.sh config`。
 11. `.bashrc` 中已存在任一 Anthropic 变量或本脚本受管块时，默认不修改；确认修改后会移除旧变量并写入新的受管块，其他行保留。覆盖前生成 `<文件名>.bak.<时间戳>`，当前文件与备份均设为 `0600`；备份可能含旧 Token，应像原 Token 一样保护。符号链接、重复或不成对受管块会报错且不修改 `.bashrc`；dotfiles 使用链接时请把 `BASHRC_FILE` 指向实际文件。原子改名失败会保留原文件并清理临时文件。
 12. 非交互执行时可预先设置 `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN`；未提供完整值时跳过 `.bashrc` 修改。脚本会在任何安装器、npm 或 TeamAI 子进程运行前取消导出这两个值及其内部副本，写配置时只使用非导出的内部变量。不要把真实 Token 写入脚本、README 或命令历史，优先使用交互隐藏输入。
-13. 默认 TeamAI 仓库位于 GitHub，初始化前需要可用的 GitHub 认证与仓库权限（可先通过 root-init 安装 `gh`，再执行 `gh auth login --web --git-protocol https`）。`teamai init` 会克隆/更新团队仓库、登记成员并配置 AI 工具，但不复制团队 skills/rules/MCP 等内容；这些内容后续通过 `teamai pull` 或会话钩子同步。脚本只依据 `teamai init` 的退出码与超时结果，不额外执行 `teamai status`，也不会自动使用 `--force`。
-14. URL 默认只允许有效 HTTPS，并拒绝空主机、userinfo、query、fragment、空白与控制字符，避免明文凭据和日志泄露。确需本机/内网 HTTP 时显式设置 `ALLOW_INSECURE_HTTP_URLS=true`。TeamAI 初始化有超时、有限重试和指数退避；超时先向进程组发 TERM，超过 `TEAMAI_KILL_AFTER` 后发送 KILL。fnm/uv 下载使用相同 URL 边界，并通过 `DOWNLOAD_MAX_TIME` 限制单次总时长；curl 同时以 `--proto` 与 `--proto-redir` 限制初始请求和重定向协议，默认禁止 HTTPS 降级到 HTTP。
+13. 默认 TeamAI 仓库位于 GitHub，手动初始化前需要可用的 GitHub 认证与仓库权限（可先通过 root-init 安装 `gh`，再执行 `gh auth login --web --git-protocol https`）。脚本只打印 `teamai init <URL> --scope user` 提示，**不会自动执行 init、status 或 `--force`**。用户手动执行 `teamai init` 时，该命令会克隆/更新团队仓库、登记成员并配置 AI 工具，但不复制团队 skills/rules/MCP 等内容；这些内容后续通过 `teamai pull` 或会话钩子同步。
+14. URL 默认只允许有效 HTTPS，并拒绝空主机、userinfo、query、fragment、空白与控制字符，避免明文凭据和日志泄露。确需本机/内网 HTTP 时显式设置 `ALLOW_INSECURE_HTTP_URLS=true`。fnm/uv 下载使用相同 URL 边界，并通过 `DOWNLOAD_MAX_TIME` 限制单次总时长；curl 同时以 `--proto` 与 `--proto-redir` 限制初始请求和重定向协议，默认禁止 HTTPS 降级到 HTTP。
