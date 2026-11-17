@@ -15,8 +15,9 @@
 # ─── 配置区（均支持环境变量覆盖） ───
 TARGET_USER="${TARGET_USER:-}"                          # 显式指定 → 非交互配置该用户（无人值守路径）；空 → 枚举 UID>=1000 用户交互提示（非 TTY 跳过）
 SUDO_NOPASSWD="${SUDO_NOPASSWD:-true}"                  # true: 安装 NOPASSWD 免密 drop-in；false: 仅加管理员组（并移除已有 drop-in）
-CORE_PACKAGES="${CORE_PACKAGES:-sudo curl tar unzip}"   # 核心包：安装失败中止初始化（libatomic 按发行版自动追加）
+CORE_PACKAGES="${CORE_PACKAGES:-sudo curl tar unzip}"   # 核心包：安装失败中止初始化（libatomic 按发行版自动追加；gh 独立安装、失败仅警告）
 OPTIONAL_PACKAGES="${OPTIONAL_PACKAGES:-}"              # 可选包：默认空不安装；按需指定（如 "wireguard-tools iptables"，RHEL 系需 EPEL）
+PKG_MGR_OVERRIDE="${PKG_MGR_OVERRIDE:-}"                # 可选：强制 apt-get/dnf/yum（跨发行版离线测试）；默认自动探测
 PASSWD_FILE="${PASSWD_FILE:-/etc/passwd}"               # 用户枚举来源（离线测试可指向临时文件）
 ENABLE_IP_FORWARD="${ENABLE_IP_FORWARD:-false}"         # true: 持久化 net.ipv4.ip_forward=1（wireguard 服务端重启后需要）
 SUDOERS_DIR="${SUDOERS_DIR:-/etc/sudoers.d}"            # sudoers drop-in 目录（离线测试可指向临时目录）
@@ -50,16 +51,21 @@ require_root() {
 
 # ─── 平台探测：包管理器 / 管理员组 / libatomic 包名 ───
 detect_platform() {
-    if command -v apt-get &>/dev/null; then
-        PKG_MGR="apt-get"; ADMIN_GROUP="sudo"; LIBATOMIC_PKG="libatomic1"
-    elif command -v dnf &>/dev/null; then
-        PKG_MGR="dnf"; ADMIN_GROUP="wheel"; LIBATOMIC_PKG="libatomic"
-    elif command -v yum &>/dev/null; then
-        PKG_MGR="yum"; ADMIN_GROUP="wheel"; LIBATOMIC_PKG="libatomic"
-    else
-        echo "[!] 未找到支持的包管理器（apt-get/dnf/yum）"
-        return 1
+    local selected="$PKG_MGR_OVERRIDE"
+    if [ -z "$selected" ]; then
+        if command -v apt-get &>/dev/null; then selected="apt-get"
+        elif command -v dnf &>/dev/null; then selected="dnf"
+        elif command -v yum &>/dev/null; then selected="yum"
+        else
+            echo "[!] 未找到支持的包管理器（apt-get/dnf/yum）"
+            return 1
+        fi
     fi
+    case "$selected" in
+        apt-get) PKG_MGR="apt-get"; ADMIN_GROUP="sudo"; LIBATOMIC_PKG="libatomic1" ;;
+        dnf|yum) PKG_MGR="$selected"; ADMIN_GROUP="wheel"; LIBATOMIC_PKG="libatomic" ;;
+        *) echo "[!] 非法的 PKG_MGR_OVERRIDE：$selected（可选 apt-get/dnf/yum）"; return 1 ;;
+    esac
 }
 
 # ─── 用户名校验：sudoers.d 文件名含 . 或 ~ 会被 sudo 忽略，故仅允许安全字符；root/空拒绝 ───
@@ -80,38 +86,55 @@ validate_username() {
 # ─── 通用受管文件写入：内容一致即 skip；覆盖前带时间戳备份；校验器通过后才原子安装 ───
 write_managed_file() { # write_managed_file <file> <content> <mode> [校验器命令...]
     local file="$1" content="$2" mode="$3"; shift 3
-    mkdir -p "$(dirname "$file")"
+    if ! mkdir -p "$(dirname "$file")"; then
+        echo "[!] 无法创建目录：$(dirname "$file")" >&2; return 1
+    fi
     if [ -f "$file" ] && [ "$(cat "$file")" = "$content" ]; then
         echo "skip"; return 0
     fi
-    local tmp
-    tmp=$(mktemp "${file}.tmp.XXXXXX")
-    printf '%s\n' "$content" > "$tmp"
+    local tmp backup
+    if ! tmp=$(mktemp "${file}.tmp.XXXXXX"); then
+        echo "[!] 无法创建临时文件：$file" >&2; return 1
+    fi
+    if ! printf '%s\n' "$content" > "$tmp"; then
+        rm -f "$tmp"; echo "[!] 无法写入临时文件：$file" >&2; return 1
+    fi
     # 校验器（如 visudo -cf）失败 → 清理临时文件，原文件不动
     if [ "$#" -gt 0 ] && ! "$@" "$tmp"; then
         rm -f "$tmp"
         echo "[!] 内容校验失败：$file（原文件未修改）" >&2
         return 1
     fi
-    chmod "$mode" "$tmp"
+    if ! chmod "$mode" "$tmp"; then
+        rm -f "$tmp"; echo "[!] 无法设置临时文件权限：$file" >&2; return 1
+    fi
     if [ -f "$file" ]; then
         # 备份名含点：sudoers.d 中含点的文件会被 sudo 忽略，备份天然不参与解析
-        cp -p "$file" "$file.bak.$(date -u +%Y-%m-%dT%H-%M-%S-%3NZ)"
+        backup="$file.bak.$(date -u +%Y-%m-%dT%H-%M-%S-%3NZ)"
+        if ! cp -p "$file" "$backup"; then
+            rm -f "$tmp"; echo "[!] 备份失败，禁止覆盖：$file" >&2; return 1
+        fi
     fi
-    mv -f "$tmp" "$file"   # 同目录临时文件 + 原子改名
+    if ! mv -f "$tmp" "$file"; then
+        rm -f "$tmp"; echo "[!] 原子改名失败，原文件未修改：$file" >&2; return 1
+    fi
     echo "updated"
 }
 
-# ─── 通用受管文件移除：移除前备份 ───
+# ─── 通用受管文件移除：备份成功才允许删除 ───
 remove_managed_file() { # remove_managed_file <file>
-    local file="$1"
-    if [ -f "$file" ]; then
-        cp -p "$file" "$file.bak.$(date -u +%Y-%m-%dT%H-%M-%S-%3NZ)"
-        rm -f "$file"
-        echo "removed"
-    else
-        echo "absent"
+    local file="$1" backup
+    if [ ! -f "$file" ]; then
+        echo "absent"; return 0
     fi
+    backup="$file.bak.$(date -u +%Y-%m-%dT%H-%M-%S-%3NZ)"
+    if ! cp -p "$file" "$backup"; then
+        echo "[!] 备份失败，禁止删除：$file" >&2; return 1
+    fi
+    if ! rm -f "$file"; then
+        echo "[!] 删除失败：$file（备份保留）" >&2; return 1
+    fi
+    echo "removed"
 }
 
 # ─── 枚举普通用户：UID>=1000 且 <65534（排除 nobody），排除 nologin/false shell 的服务账户 ───
@@ -210,7 +233,10 @@ configure_sudo() { # configure_sudo <user>
             echo "    注意：$user 已拥有免密 root 权限，仅限可信机器；收紧：SUDO_NOPASSWD=false"
         fi
     else
-        r=$(remove_managed_file "$dropin")
+        if ! r=$(remove_managed_file "$dropin"); then
+            echo "[!] 移除 $dropin 失败，SUDO_NOPASSWD=false 未生效"
+            return 1
+        fi
         if [ "$r" = "removed" ]; then
             echo "[+] 已移除 $dropin（SUDO_NOPASSWD=false，备份保留）"
         else
@@ -233,13 +259,30 @@ manage_ip_forward() {
             echo "[+] 已写入 $SYSCTL_FILE（net.ipv4.ip_forward = 1）"
         fi
     else
-        r=$(remove_managed_file "$SYSCTL_FILE")
+        if ! r=$(remove_managed_file "$SYSCTL_FILE"); then
+            echo "[!] 移除 $SYSCTL_FILE 失败，ENABLE_IP_FORWARD=false 未生效"
+            return 1
+        fi
         if [ "$r" = "removed" ]; then
             echo "[+] 已移除 $SYSCTL_FILE（ENABLE_IP_FORWARD=false，备份保留）"
         else
             echo "[*] $SYSCTL_FILE 不存在，无需处理"
         fi
     fi
+}
+
+# ─── 独立安装 gh：失败仅提醒，不修改软件源、不阻断其他初始化 ───
+install_gh() {
+    local -a cmd
+    case "$PKG_MGR" in
+        apt-get) cmd=(apt-get install -y -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 gh) ;;
+        dnf|yum) cmd=("$PKG_MGR" install -y --setopt=timeout=30 gh) ;;
+    esac
+    if ! retry "${cmd[@]}"; then
+        echo "[!] gh 安装失败；请检查当前软件源是否提供 gh，稍后手动安装。其他初始化继续"
+        return 0
+    fi
+    echo "[+] gh 已安装"
 }
 
 # ─── 安装系统包：核心包失败中止，可选包失败仅警告 ───
@@ -267,6 +310,7 @@ install_packages() {
     esac
     echo "[+] 核心包已安装"
 
+    install_gh
     install_optional_packages
 }
 
@@ -313,7 +357,7 @@ show_status() {
     echo "── 包 ──"
     local p
     local -a pkgs
-    read -r -a pkgs <<< "$CORE_PACKAGES $LIBATOMIC_PKG $OPTIONAL_PACKAGES"
+    read -r -a pkgs <<< "$CORE_PACKAGES $LIBATOMIC_PKG gh $OPTIONAL_PACKAGES"
     for p in "${pkgs[@]}"; do
         if is_pkg_installed "$p"; then echo "  [+] $p"; else echo "  [!] $p 未安装"; fi
     done
@@ -373,7 +417,10 @@ clean() {
     fi
     for u in "${users[@]}"; do
         if validate_username "$u"; then
-            r=$(remove_managed_file "$SUDOERS_DIR/$u")
+            if ! r=$(remove_managed_file "$SUDOERS_DIR/$u"); then
+                echo "[!] 清理 $SUDOERS_DIR/$u 失败"
+                return 1
+            fi
             if [ "$r" = "removed" ]; then
                 echo "[+] 已移除 $SUDOERS_DIR/$u（备份保留）"
             else
@@ -381,7 +428,10 @@ clean() {
             fi
         fi
     done
-    r=$(remove_managed_file "$SYSCTL_FILE")
+    if ! r=$(remove_managed_file "$SYSCTL_FILE"); then
+        echo "[!] 清理 $SYSCTL_FILE 失败"
+        return 1
+    fi
     if [ "$r" = "removed" ]; then
         echo "[+] 已移除 $SYSCTL_FILE（备份保留）"
     else

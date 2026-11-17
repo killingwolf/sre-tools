@@ -7,10 +7,11 @@ sudo ./root-init.sh setup
       │
       ├─ 0. 前置   root 检查 + 平台探测（apt-get/dnf/yum → 管理员组 sudo/wheel、libatomic 包名）
       ├─ 1. 核心包 sudo curl tar unzip libatomic（失败中止初始化）
-      ├─ 2. 可选包 默认空不安装（OPTIONAL_PACKAGES 按需指定；失败仅警告，不阻塞）
-      ├─ 3. sudo   目标用户（显式 TARGET_USER 或枚举 UID>=1000 交互确认）
+      ├─ 2. gh     独立安装（失败仅警告，不修改 EPEL/软件源，不阻断后续步骤）
+      ├─ 3. 可选包 默认空不安装（OPTIONAL_PACKAGES 按需指定；失败仅警告，不阻塞）
+      ├─ 4. sudo   目标用户（显式 TARGET_USER 或枚举 UID>=1000 交互确认）
       │            加管理员组 + NOPASSWD drop-in（visudo -cf 校验通过后安装）
-      └─ 4. 可选   /etc/sysctl.d/99-root-init.conf → ip_forward=1（并立即运行时生效）
+      └─ 5. 可选   /etc/sysctl.d/99-root-init.conf → ip_forward=1（并立即运行时生效）
 ```
 
 ## 快速开始
@@ -50,7 +51,8 @@ sudo -n true && echo "免密 sudo OK"    # -n 非交互：需要密码时立即�
 | `TARGET_USER` | `空` | 显式指定 → 非交互配置该用户（无人值守路径）；空 → 枚举 UID>=1000 的可登录普通用户逐个交互确认 `[y/N]`（非 TTY 环境跳过并提示）；须通过用户名白名单校验且非 root |
 | `SUDO_NOPASSWD` | `true` | `true`：安装 NOPASSWD 免密 drop-in；`false`：仅加管理员组并移除已有 drop-in（sudo 需密码） |
 | `CORE_PACKAGES` | `sudo curl tar unzip` | 核心包列表（空格分隔），另按发行版自动追加 `libatomic1`（Debian 系）/ `libatomic`（RHEL 系）；失败中止 |
-| `OPTIONAL_PACKAGES` | `空`（默认不安装） | 可选包列表，按需指定（如 `wireguard-tools iptables`）；失败仅警告（RHEL 系 wireguard-tools 需 EPEL） |
+| `OPTIONAL_PACKAGES` | `空`（默认不安装） | 可选包列表，按需指定（如 `wireguard-tools iptables`）；失败仅警告（RHEL 系 wireguard-tools 需自行配置 EPEL） |
+| `PKG_MGR_OVERRIDE` | `空`（自动探测） | 可强制 `apt-get` / `dnf` / `yum`，用于跨发行版离线测试或明确指定包管理器 |
 | `ENABLE_IP_FORWARD` | `false` | `true`：持久化 `net.ipv4.ip_forward=1` 并立即生效；`false`：移除本脚本的 sysctl 配置 |
 | `PASSWD_FILE` | `/etc/passwd` | 用户枚举来源（离线测试可指向临时文件） |
 | `SUDOERS_DIR` | `/etc/sudoers.d` | drop-in 目录（离线测试可指向临时目录） |
@@ -63,9 +65,9 @@ sudo -n true && echo "免密 sudo OK"    # -n 非交互：需要密码时立即�
 1. **必须 root**：非 root 运行在做任何事之前即报错退出，并提示用 `sudo` 运行。
 2. **NOPASSWD 安全警告**：默认配置使目标用户获得**完全免密的 root 权限**，仅限可信机器 / 隔离环境。收紧：`sudo SUDO_NOPASSWD=false TARGET_USER=<用户> ./root-init.sh setup`（移除 drop-in、保留组身份，sudo 恢复需要密码；注意这会让 claude-env 的无人值守依赖安装失效）。
 3. **sudoers 安全护栏**：drop-in 内容先经 `visudo -cf` 校验、通过后才原子安装（0440、root 所有）；文件名 = 用户名，经白名单校验（小写字母/underscore 开头，仅含小写字母/数字/`_`/`-`）——sudoers.d 中文件名含 `.` 或 `~` 会被 sudo 忽略，校验从根源杜绝；备份文件名含点，天然不参与 sudo 解析。
-4. **备份**：覆盖 / 移除受管文件（drop-in、sysctl 配置）前自动生成带时间戳备份 `<文件名>.bak.<时间戳>`；内容一致的幂等重跑不产生备份。
+4. **备份**：覆盖 / 移除受管文件（drop-in、sysctl 配置）前自动生成带时间戳备份 `<文件名>.bak.<时间戳>`；内容一致的幂等重跑不产生备份。备份失败会明确报错并禁止覆盖或删除，原子改名失败也会保留原文件。
 5. **声明式收敛**：`SUDO_NOPASSWD` / `ENABLE_IP_FORWARD` 取 true/false 重跑均收敛到对应状态（安装 / 移除），与 claude-env 的配置语义一致。
-6. RHEL 系安装 wireguard-tools 通常需先启用 EPEL（`dnf install -y epel-release`）；可选包失败只警告，不阻塞核心初始化。
+6. **gh 独立安装**：脚本直接使用当前 apt-get/dnf/yum 软件源安装 `gh`，不会新增或修改 EPEL 等软件源。安装失败只输出警告并继续后续 sudo/sysctl 初始化；用户可根据提示稍后手动安装。RHEL 系可选包 wireguard-tools 如需 EPEL，也请自行配置；可选包失败同样只警告。
 7. `clean` 移除受管 drop-in（`TARGET_USER` 指定时仅该用户，否则枚举全部普通用户）与 sysctl 配置（先备份），不卸载包、不移除组成员身份。
-8. 与其他工具的关系：**root-init（系统级，root）→ claude-env（用户级，普通用户）→ wireguard（root，网络配置）**；root-init 装好依赖并配好免密 sudo 后，claude-env 可全程无人值守。
+8. 与其他工具的关系：**root-init（系统级，root）→ claude-env（用户级，普通用户）→ wireguard（root，网络配置）**；root-init 装好依赖并配好免密 sudo 后，claude-env 的系统依赖安装可无人值守（首次 API 环境变量输入与 TeamAI 初始化仍可能需要交互）。独立安装的 **gh** 是 GitHub CLI，供 TeamAI 默认 GitHub 仓库的认证与后续协作使用。
 9. **交互与无人值守**：默认交互确认要求 stdin 为终端；非 TTY 环境（cron / 管道）且未指定 `TARGET_USER` 时**跳过 sudo 配置并提示**，绝不静默授权。`SUDO_USER` 仅在提示中标注「本次 sudo 发起者」作参考，不再自动配置。用户枚举排除 nobody（UID 65534）与 nologin/false shell 的服务账户。
