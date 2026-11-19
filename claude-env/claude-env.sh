@@ -4,9 +4,10 @@
 #       最新 LTS 版 node，并通过 npm 安装 Claude Code 等全局工具
 #
 # 使用方式：
-#   初始化：./claude-env.sh setup    # 安装 + Claude/Anthropic 配置 + TeamAI 手动命令提示
-#   状态：  ./claude-env.sh show     # 查看各组件版本 / 安装状态
-#   TeamAI：./claude-env.sh teamai   # 仅打印手动初始化命令（TEAMAI_REPO_URL 可覆盖）
+#   初始化：./claude-env.sh setup      # 安装 + Claude/Anthropic 配置 + TeamAI/CodeGraph 手动命令提示
+#   状态：  ./claude-env.sh show       # 查看各组件版本 / 安装状态
+#   TeamAI：./claude-env.sh teamai     # 仅打印手动初始化命令（TEAMAI_REPO_URL 可覆盖）
+#   CodeGraph：./claude-env.sh codegraph # 仅打印 Agent 接入与项目索引手动命令
 #
 #   网络重试与镜像均可用环境变量覆盖（RETRY_MAX / RETRY_DELAY / FNM_INSTALL_URL /
 #   UV_INSTALL_URL / NPM_CONFIG_REGISTRY / FNM_NODE_DIST_MIRROR 等），详见 README
@@ -17,7 +18,7 @@ set -E    # 让 ERR trap 在函数内部也生效
 trap 'echo "[!] 脚本在第 $LINENO 行失败：$BASH_COMMAND"' ERR
 
 # ─── 配置区（均支持环境变量覆盖，便于切换镜像 / 调整重试参数） ───
-# 在任何第三方命令运行前保存并取消导出敏感环境值，避免安装器/npm/TeamAI 子进程继承
+# 在任何第三方命令运行前保存并取消导出敏感环境值，避免安装器/npm/TeamAI/CodeGraph 子进程继承
 ANTHROPIC_AUTH_TOKEN_VALUE="${ANTHROPIC_AUTH_TOKEN-}"
 ANTHROPIC_BASE_URL_VALUE="${ANTHROPIC_BASE_URL-}"
 export -n ANTHROPIC_AUTH_TOKEN_VALUE ANTHROPIC_BASE_URL_VALUE
@@ -28,6 +29,7 @@ UV_INSTALL_URL="${UV_INSTALL_URL:-https://astral.sh/uv/install.sh}"     # uv 官
 export FNM_NODE_DIST_MIRROR="${FNM_NODE_DIST_MIRROR:-https://mirrors.aliyun.com/nodejs-release/}"
 NPM_TOOLS=(                                         # npm 全局工具，按需追加；可带版本号（如 pnpm@9.1.0）
     "@anthropic-ai/claude-code"
+    "@colbymchenry/codegraph"
     "teamai-cli"
 )
 TEAMAI_REPO_URL="${TEAMAI_REPO_URL:-https://github.com/killingwolf/aiwolfs}"  # TeamAI 团队仓库完整 URL（仅用于手动命令提示）
@@ -286,6 +288,16 @@ print_teamai_hint() {
     fi
     printf '[*] TeamAI 初始化需要交互，已跳过自动执行。请手动运行：\n'
     printf '    teamai init %q --scope user\n' "$TEAMAI_REPO_URL"
+}
+
+# ─── 输出 CodeGraph 手动接入提示，避免 setup 隐式修改 Agent 配置或创建项目索引 ───
+print_codegraph_hint() {
+    printf '[*] CodeGraph：本脚本仅安装 CLI，不自动接入 Agent 或创建项目索引。\n'
+    printf '    Agent 接入会修改 Claude 全局配置，请先备份已存在的 ~/.claude.json、~/.claude/settings.json、~/.claude/CLAUDE.md。\n'
+    printf '    请交互运行（hook 与 telemetry 默认均为开启，请按需选择）：\n'
+    printf '    codegraph install --target=claude --location=global --no-permissions\n'
+    printf '    --no-permissions 仅关闭 auto-allow，不关闭 UserPromptSubmit hook。\n'
+    printf '    重启 Claude Code 后，在目标项目内运行：codegraph init && codegraph status\n'
 }
 
 # ─── 通用 JSON 合并：把 patch 深合并进目标文件，stdout 输出 skip / updated ───
@@ -563,6 +575,11 @@ show_components() {
     else
         echo "  claude: 未安装"
     fi
+    if command -v codegraph &>/dev/null; then
+        echo "  codegraph: $(codegraph --version)"
+    else
+        echo "  codegraph: 未安装"
+    fi
 }
 
 # ─── 查看 settings.json 权限配置状态 ───
@@ -636,6 +653,7 @@ banner() {
     if command -v npm &>/dev/null; then echo "    npm:    $(npm --version)"; fi
     if command -v uv &>/dev/null; then echo "    uv:     $(uv --version)"; fi
     if command -v claude &>/dev/null; then echo "    claude: $(claude --version)"; fi
+    if command -v codegraph &>/dev/null; then echo "    codegraph: $(codegraph --version)"; fi
     echo ""
     echo "  权限模式：$CLAUDE_PERMISSION_MODE（所有工具操作不再询问确认，详见 README）"
     if [ "$CLAUDE_SKIP_DANGEROUS_PROMPT" = "true" ]; then
@@ -650,6 +668,8 @@ banner() {
     echo "    2. claude --version        # 验证安装"
     echo ""
     print_teamai_hint
+    echo ""
+    print_codegraph_hint
     echo ""
     echo "    3. claude -p hi               # 首次运行，按浏览器提示登录"
     echo "==========================================="
@@ -679,11 +699,15 @@ case "${1:-}" in
     teamai)
         print_teamai_hint
         ;;
+    codegraph)
+        print_codegraph_hint
+        ;;
     *)
         echo "用法："
-        echo "  $0 setup    # 初始化安装（fnm / uv / node LTS / Claude Code / 环境变量与权限配置），并提示 TeamAI 手动命令"
-        echo "  $0 config   # 仅重写 Claude Code 配置与 .bashrc Anthropic 环境变量，不执行安装或 TeamAI 初始化"
-        echo "  $0 show     # 查看各组件版本 / 安装状态"
-        echo "  $0 teamai   # 仅打印 TeamAI 手动初始化命令（TEAMAI_REPO_URL 可覆盖）"
+        echo "  $0 setup      # 初始化安装（fnm / uv / node LTS / Claude Code / CodeGraph / 环境变量与权限配置），并提示 TeamAI/CodeGraph 手动命令"
+        echo "  $0 config     # 仅重写 Claude Code 配置与 .bashrc Anthropic 环境变量，不执行安装、TeamAI 初始化或 CodeGraph 接入/索引"
+        echo "  $0 show       # 查看各组件版本 / 安装状态"
+        echo "  $0 teamai     # 仅打印 TeamAI 手动初始化命令（TEAMAI_REPO_URL 可覆盖）"
+        echo "  $0 codegraph  # 仅打印 CodeGraph Agent 接入与项目索引手动命令"
         ;;
 esac

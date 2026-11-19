@@ -1,6 +1,6 @@
 # Claude 开发环境初始化
 
-在新机器上一键安装 Claude Code 的开发依赖：**fnm**（Node 版本管理）、**uv**（Python 项目管理）、最新 **LTS Node.js**（发行包默认走阿里云镜像），通过 npm 全局安装 **Claude Code** 与 **teamai-cli**。安装完成后**不自动执行** `teamai init`，而是在 `claude -p hi` 启动提示前输出需要用户手动执行的命令（默认仓库 `https://github.com/killingwolf/aiwolfs`，可用 `TEAMAI_REPO_URL` 覆盖），避免脚本进入 TeamAI 交互流程。脚本将用户提供的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 写入 `~/.bashrc`。同时写入 Claude Code 配置：用户级 `~/.claude/settings.json` 写入 `permissions.defaultMode: bypassPermissions`（工具操作不再询问确认）与 `skipDangerousModePermissionPrompt: true`（跳过 bypass 模式启动时的危险模式确认弹窗）；全局状态文件 `~/.claude.json` 写入 `hasCompletedOnboarding: true`（跳过首次启动引导，保留登录态/项目历史等其他键）。脚本幂等，可重复执行。
+在新机器上一键安装 Claude Code 的开发依赖：**fnm**（Node 版本管理）、**uv**（Python 项目管理）、最新 **LTS Node.js**（发行包默认走阿里云镜像），通过 npm 全局安装 **Claude Code**、**CodeGraph CLI** 与 **teamai-cli**。安装完成后**不自动执行** `teamai init` 或 CodeGraph Agent 接入，而是在 `claude -p hi` 启动提示前输出需要用户手动执行的命令（TeamAI 默认仓库 `https://github.com/killingwolf/aiwolfs`，可用 `TEAMAI_REPO_URL` 覆盖），避免脚本进入 TeamAI / CodeGraph 交互流程，也不在 setup 当前目录隐式创建 `.codegraph/`。脚本将用户提供的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 写入 `~/.bashrc`。同时写入 Claude Code 配置：用户级 `~/.claude/settings.json` 写入 `permissions.defaultMode: bypassPermissions`（工具操作不再询问确认）与 `skipDangerousModePermissionPrompt: true`（跳过 bypass 模式启动时的危险模式确认弹窗）；全局状态文件 `~/.claude.json` 写入 `hasCompletedOnboarding: true`（跳过首次启动引导，保留登录态/项目历史等其他键）。脚本幂等，可重复执行。
 
 ```
 ./claude-env.sh setup
@@ -8,12 +8,13 @@
       ├─ 1. fnm     node 版本管理器   → ~/.local/share/fnm
       ├─ 2. uv      python 项目管理器 → ~/.local/bin
       ├─ 3. node    fnm install --lts（最新 LTS，默认从阿里云镜像下载）
-      ├─ 4. npm     全局工具：@anthropic-ai/claude-code、teamai-cli
+      ├─ 4. npm     全局工具：@anthropic-ai/claude-code、@colbymchenry/codegraph、teamai-cli
       ├─ 5. 配置    ~/.bashrc → ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN（交互输入）
       │              ~/.claude/settings.json → permissions.defaultMode: bypassPermissions
       │              + skipDangerousModePermissionPrompt: true（顶层键）
       │              ~/.claude.json → hasCompletedOnboarding: true（保留其他键）
-      └─ 6. teamai  仅提示手动 init 命令（不自动执行，提示位于 claude -p hi 之前）
+      ├─ 6. teamai  仅提示手动 init 命令（不自动执行，提示位于 claude -p hi 之前）
+      └─ 7. codegraph 仅提示 Agent 接入与项目索引命令（不自动执行）
 ```
 
 ## 快速开始
@@ -24,7 +25,7 @@
 ./claude-env.sh setup
 ```
 
-已安装的组件会输出 `[*] ... 已安装，跳过`，不会重复安装。未配置 Anthropic 环境变量时，脚本会提示输入 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`（Token 输入不回显）；`.bashrc` 已有任一变量时会询问是否修改，**直接回车或输入非 `y` 均保留原配置**。也可在执行前通过同名环境变量提供两个值。
+已安装的组件会输出 `[*] ... 已安装，跳过`，不会重复安装。未配置 Anthropic 环境变量时，脚本会提示输入 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`（Token 输入不回显）；`.bashrc` 已有任一变量时会询问是否修改，**直接回车或输入非 `y` 均保留原配置**。也可在执行前通过同名环境变量提供两个值。CodeGraph 仅安装 CLI，Agent 接入和项目索引按完成摘要中的手动步骤执行。
 
 ### 步骤 2：使环境生效
 
@@ -41,6 +42,7 @@ fnm --version
 node --version      # 应为最新 LTS
 uv --version
 claude --version
+codegraph --version
 teamai --version
 teamai status        # 手动完成 TeamAI init 后，验证 user scope 与所配置仓库
 printf 'ANTHROPIC_BASE_URL=%s\n' "$ANTHROPIC_BASE_URL"
@@ -54,11 +56,48 @@ claude -p hi       # 首次运行，按浏览器提示登录
 
 | 命令 | 说明 |
 |------|------|
-| `./claude-env.sh setup` | 初始化安装全部组件 + 写入权限与 Anthropic 环境变量配置 + 输出 TeamAI 手动命令（可重复执行） |
-| `./claude-env.sh config` | 仅重写 Claude Code 配置与 `.bashrc` Anthropic 环境变量，不执行安装或 TeamAI 初始化 |
+| `./claude-env.sh setup` | 初始化安装全部组件 + 写入权限与 Anthropic 环境变量配置 + 输出 TeamAI / CodeGraph 手动命令（可重复执行） |
+| `./claude-env.sh config` | 仅重写 Claude Code 配置与 `.bashrc` Anthropic 环境变量，不执行安装、TeamAI 初始化或 CodeGraph 接入/索引 |
 | `./claude-env.sh teamai` | 仅打印 `teamai init "$TEAMAI_REPO_URL" --scope user` 手动命令，不执行 TeamAI |
+| `./claude-env.sh codegraph` | 仅打印 CodeGraph Agent 接入与项目索引手动命令，不执行任何 CodeGraph 子命令 |
 | `./claude-env.sh show` | 查看各组件版本 / 安装状态、权限模式、onboarding 标记及 npm 全局包 |
-| `./test-claude-env.sh` | 离线回归测试权限、环境变量及 TeamAI 手动提示逻辑（临时目录 + shim，不触碰真实配置） |
+| `./test-claude-env.sh` | 离线回归测试权限、环境变量及 TeamAI / CodeGraph 手动提示逻辑（临时目录 + shim，不触碰真实配置） |
+
+## CodeGraph 手动接入与项目索引
+
+`setup` 只安装 CodeGraph CLI。CLI 安装、Claude Code 的 MCP 接入、项目索引是三个独立步骤；脚本不会自动执行后两步，也不会把 CLI 版本显示为“已接入”或“已索引”。
+
+1. **先备份 Agent 配置**。CodeGraph 的全局接入可能修改 `~/.claude.json`、`~/.claude/settings.json` 和 `~/.claude/CLAUDE.md`。第三方安装器对有效 JSON 的正常更新不会生成常规时间戳备份，因此先为已存在的文件建立独立备份目录。`cp -aL` 会读取符号链接指向的实际内容，避免只备份链接而丢失回滚依据：
+
+   ```bash
+   backup_dir="$(mktemp -d "$HOME/.claude-codegraph-backup.$(date +%Y%m%d-%H%M%S).XXXXXXXX")"
+   for f in \
+     "$HOME/.claude.json" \
+     "$HOME/.claude/settings.json" \
+     "$HOME/.claude/CLAUDE.md"
+   do
+     [ ! -f "$f" ] || cp -aL -- "$f" "$backup_dir/"
+   done
+   printf 'CodeGraph 接入前备份：%s\n' "$backup_dir"
+   ```
+
+2. **交互接入 Claude Code**：
+
+   ```bash
+   codegraph install --target=claude --location=global --no-permissions
+   ```
+
+   不要在这里添加 `--yes` 或 `--init`。`--no-permissions` 只关闭 auto-allow，**不会关闭 UserPromptSubmit hook**；hook 与匿名遥测的交互默认选项均为开启，请按需明确选择。接入完成后重启 Claude Code。
+
+3. **逐项目创建索引**。全局 Agent 接入只需一次，但每个需要代码图谱的项目都要单独初始化：
+
+   ```bash
+   cd /path/to/project
+   codegraph init
+   codegraph status
+   ```
+
+   请进入明确选择的项目后执行，不要在 `claude-env` 目录误建索引。之后可随时用 `./claude-env.sh codegraph` 重新查看这些提示。
 
 ## 配置变量
 
@@ -69,7 +108,7 @@ claude -p hi       # 首次运行，按浏览器提示登录
 | `FNM_INSTALL_URL` | `https://fnm.vercel.app/install` | fnm 官方安装脚本地址 |
 | `UV_INSTALL_URL` | `https://astral.sh/uv/install.sh` | uv 官方安装脚本地址 |
 | `FNM_NODE_DIST_MIRROR` | `https://mirrors.aliyun.com/nodejs-release/` | node 发行包下载镜像（fnm 原生支持的环境变量），默认阿里云；设为 `https://nodejs.org/dist` 回官方源 |
-| `NPM_TOOLS` | `@anthropic-ai/claude-code`、`teamai-cli` | npm 全局工具列表，按需追加（如 `pnpm`）；可带版本号固定（如 `pnpm@9.1.0`） |
+| `NPM_TOOLS` | `@anthropic-ai/claude-code`、`@colbymchenry/codegraph`、`teamai-cli` | npm 全局工具列表，按需追加（如 `pnpm`）；可带版本号固定（如 `pnpm@9.1.0`） |
 | `ANTHROPIC_BASE_URL` | `空` | Anthropic API 地址；空时交互询问。默认须为有效 HTTPS URL，不得含 userinfo/query/fragment |
 | `ANTHROPIC_AUTH_TOKEN` | `空` | Anthropic API Token；空时交互询问且不回显，也可通过环境变量提供；运行安装器前会从子进程环境移除 |
 | `BASHRC_FILE` | `~/.bashrc` | Anthropic 环境变量写入文件；已有变量时默认保留，确认修改前自动备份；符号链接会被拒绝 |
@@ -89,7 +128,7 @@ claude -p hi       # 首次运行，按浏览器提示登录
 所有网络操作均带指数退避重试；node 发行包已默认走阿里云镜像（`FNM_NODE_DIST_MIRROR`）。如仍不稳定，可用环境变量指定镜像后再执行 `setup`：
 
 ```bash
-export NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"        # npm 包（claude-code / teamai-cli）
+export NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"        # npm 包（claude-code / CodeGraph / teamai-cli）
 export FNM_INSTALL_URL="<内网镜像的 fnm 安装脚本地址>"               # 安装脚本本身
 export UV_INSTALL_URL="<内网镜像的 uv 安装脚本地址>"
 ./claude-env.sh setup
@@ -116,6 +155,6 @@ TEAMAI_REPO_URL="https://git.example.com/your-org/your-team.git" ./claude-env.sh
 9. 切换 / 管理 Node 版本：`fnm install <版本>`、`fnm default <版本>`、`fnm use <版本>`，详见 [fnm 文档](https://github.com/Schniz/fnm)。
 10. `hasCompletedOnboarding: true` 只跳过首次启动引导，**不替代登录**，首次运行 `claude` 仍需按提示完成认证（见步骤 3）；要恢复引导时设 `CLAUDE_SKIP_ONBOARDING=false` 后执行 `./claude-env.sh config`。
 11. `.bashrc` 中已存在任一 Anthropic 变量或本脚本受管块时，默认不修改；确认修改后会移除旧变量并写入新的受管块，其他行保留。覆盖前生成 `<文件名>.bak.<时间戳>`，当前文件与备份均设为 `0600`；备份可能含旧 Token，应像原 Token 一样保护。符号链接、重复或不成对受管块会报错且不修改 `.bashrc`；dotfiles 使用链接时请把 `BASHRC_FILE` 指向实际文件。原子改名失败会保留原文件并清理临时文件。
-12. 非交互执行时可预先设置 `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN`；未提供完整值时跳过 `.bashrc` 修改。脚本会在任何安装器、npm 或 TeamAI 子进程运行前取消导出这两个值及其内部副本，写配置时只使用非导出的内部变量。不要把真实 Token 写入脚本、README 或命令历史，优先使用交互隐藏输入。
+12. 非交互执行时可预先设置 `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN`；未提供完整值时跳过 `.bashrc` 修改。脚本会在任何安装器、npm、TeamAI 或 CodeGraph 子进程运行前取消导出这两个值及其内部副本，写配置时只使用非导出的内部变量。不要把真实 Token 写入脚本、README 或命令历史，优先使用交互隐藏输入。
 13. 默认 TeamAI 仓库位于 GitHub，手动初始化前需要可用的 GitHub 认证与仓库权限（可先通过 root-init 安装 `gh`，再执行 `gh auth login --web --git-protocol https`）。脚本只打印 `teamai init <URL> --scope user` 提示，**不会自动执行 init、status 或 `--force`**。用户手动执行 `teamai init` 时，该命令会克隆/更新团队仓库、登记成员并配置 AI 工具，但不复制团队 skills/rules/MCP 等内容；这些内容后续通过 `teamai pull` 或会话钩子同步。
 14. URL 默认只允许有效 HTTPS，并拒绝空主机、userinfo、query、fragment、空白与控制字符，避免明文凭据和日志泄露。确需本机/内网 HTTP 时显式设置 `ALLOW_INSECURE_HTTP_URLS=true`。fnm/uv 下载使用相同 URL 边界，并通过 `DOWNLOAD_MAX_TIME` 限制单次总时长；curl 同时以 `--proto` 与 `--proto-redir` 限制初始请求和重定向协议，默认禁止 HTTPS 降级到 HTTP。

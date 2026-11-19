@@ -298,7 +298,7 @@ case "$(cat "$WORK_DIR/t23.out")" in
 esac
 if [ ! -s "$teamai_log" ]; then ok "T23 自定义仓库也不执行 teamai"; else bad "T23 自定义仓库也不执行 teamai"; fi
 
-echo "== T24 setup 公共入口：TeamAI 仅提示不执行 =="
+echo "== T24 setup 公共入口：TeamAI/CodeGraph 仅提示不执行 =="
 setup_shim_dir="$WORK_DIR/setup-bin"
 setup_home="$WORK_DIR/setup-home"
 setup_log="$WORK_DIR/setup-order.log"
@@ -345,6 +345,15 @@ if [ "${ANTHROPIC_AUTH_TOKEN+x}" = x ] || [ "${ANTHROPIC_AUTH_TOKEN_VALUE+x}" = 
 fi
 printf '%s\n' "$*" >> "$ORDER_LOG"
 EOF
+cat > "$setup_shim_dir/codegraph" <<'EOF'
+#!/bin/bash
+if [ "${ANTHROPIC_AUTH_TOKEN+x}" = x ] || [ "${ANTHROPIC_AUTH_TOKEN_VALUE+x}" = x ] || \
+   [ "${ANTHROPIC_BASE_URL+x}" = x ] || [ "${ANTHROPIC_BASE_URL_VALUE+x}" = x ]; then
+    : > "$TOKEN_LEAK_FILE"
+fi
+printf '%s\n' "$*" >> "$CODEGRAPH_LOG"
+if [ "${1:-}" = "--version" ]; then echo "codegraph test"; fi
+EOF
 for cmd in curl tar unzip sudo apt-get dnf yum; do
     cat > "$setup_shim_dir/$cmd" <<'EOF'
 #!/bin/bash
@@ -356,8 +365,11 @@ EOF
 done
 chmod +x "$setup_shim_dir"/*
 : > "$setup_log"
+codegraph_log="$WORK_DIR/codegraph.log"
+: > "$codegraph_log"
 rm -f "$WORK_DIR/token-leaked" "$WORK_DIR/package-manager-called"
 if env -u TEAMAI_REPO_URL HOME="$setup_home" PATH="$setup_shim_dir:$PATH" ORDER_LOG="$setup_log" \
+    CODEGRAPH_LOG="$codegraph_log" \
     TOKEN_LEAK_FILE="$WORK_DIR/token-leaked" \
     PACKAGE_MANAGER_LOG="$WORK_DIR/package-manager-called" \
     CLAUDE_SETTINGS_FILE="$setup_home/settings.json" \
@@ -373,6 +385,8 @@ else
 fi
 expected="npm ls -g --depth=0 @anthropic-ai/claude-code
 npm install -g @anthropic-ai/claude-code@latest
+npm ls -g --depth=0 @colbymchenry/codegraph
+npm install -g @colbymchenry/codegraph@latest
 npm ls -g --depth=0 teamai-cli
 npm install -g teamai-cli@latest"
 if [ "$(cat "$setup_log")" = "$expected" ]; then
@@ -380,9 +394,28 @@ if [ "$(cat "$setup_log")" = "$expected" ]; then
 else
     bad "T24 setup 未调用 teamai init/status"
 fi
+if [ "$(cat "$codegraph_log")" = "--version" ]; then
+    ok "T24 setup 仅查询 CodeGraph 版本，不执行 install/init/telemetry"
+else
+    bad "T24 setup 仅查询 CodeGraph 版本，不执行 install/init/telemetry"
+fi
 case "$(cat "$WORK_DIR/t24.out")" in
     *'teamai init https://github.com/killingwolf/aiwolfs --scope user'*) ok "T24 setup 输出 TeamAI 手动命令" ;;
     *) bad "T24 setup 输出 TeamAI 手动命令" ;;
+esac
+case "$(cat "$WORK_DIR/t24.out")" in
+    *'codegraph install --target=claude --location=global --no-permissions'*'codegraph init && codegraph status'*)
+        ok "T24 setup 输出 CodeGraph 手动接入与项目索引命令" ;;
+    *) bad "T24 setup 输出 CodeGraph 手动接入与项目索引命令" ;;
+esac
+case "$(cat "$WORK_DIR/t24.out")" in
+    *'请先备份已存在的 ~/.claude.json'*'UserPromptSubmit hook'*)
+        ok "T24 setup 提示 CodeGraph 配置备份与 hook 影响" ;;
+    *) bad "T24 setup 提示 CodeGraph 配置备份与 hook 影响" ;;
+esac
+case "$(cat "$WORK_DIR/t24.out")" in
+    *'codegraph: codegraph test'*) ok "T24 setup 显示 CodeGraph 版本" ;;
+    *) bad "T24 setup 显示 CodeGraph 版本" ;;
 esac
 teamai_hint_line="$(grep -n 'teamai init ' "$WORK_DIR/t24.out" | head -1 | cut -d: -f1)"
 claude_start_line="$(grep -n '3\. claude -p hi' "$WORK_DIR/t24.out" | head -1 | cut -d: -f1)"
@@ -393,15 +426,58 @@ else
     bad "T24 TeamAI 提示位于 claude -p hi 之前"
 fi
 if [ ! -e "$WORK_DIR/token-leaked" ]; then
-    ok "T24 环境 Token 不继承给 npm 或 TeamAI 子进程"
+    ok "T24 环境 Token 不继承给 npm、TeamAI 或 CodeGraph 子进程"
 else
-    bad "T24 环境 Token 不继承给 npm 或 TeamAI 子进程"
+    bad "T24 环境 Token 不继承给 npm、TeamAI 或 CodeGraph 子进程"
 fi
 if [ ! -e "$WORK_DIR/package-manager-called" ]; then
     ok "T24 基础命令与包管理器全部隔离，不触达真实系统"
 else
     bad "T24 基础命令与包管理器全部隔离，不触达真实系统"
 fi
+
+echo "== T25 codegraph 公共入口与组件状态 =="
+codegraph_hint_log="$WORK_DIR/codegraph-hint.log"
+: > "$codegraph_hint_log"
+if env HOME="$setup_home" PATH="$setup_shim_dir:$PATH" CODEGRAPH_LOG="$codegraph_hint_log" \
+    bash "$SUT" codegraph >"$WORK_DIR/t25.out" 2>&1; then
+    ok "T25 codegraph 提示入口正常完成"
+else
+    bad "T25 codegraph 提示入口正常完成"
+fi
+case "$(cat "$WORK_DIR/t25.out")" in
+    *'codegraph install --target=claude --location=global --no-permissions'*'codegraph init && codegraph status'*)
+        ok "T25 输出全局接入与逐项目索引命令" ;;
+    *) bad "T25 输出全局接入与逐项目索引命令" ;;
+esac
+case "$(cat "$WORK_DIR/t25.out")" in
+    *'请先备份已存在的 ~/.claude.json'*'UserPromptSubmit hook'*)
+        ok "T25 输出配置备份与 hook 提醒" ;;
+    *) bad "T25 输出配置备份与 hook 提醒" ;;
+esac
+case "$(cat "$WORK_DIR/t25.out")" in
+    *'--yes'*|*'--init'*) bad "T25 推荐命令不包含 --yes 或 --init" ;;
+    *) ok "T25 推荐命令不包含 --yes 或 --init" ;;
+esac
+if [ ! -s "$codegraph_hint_log" ]; then
+    ok "T25 codegraph 提示入口不执行任何 CodeGraph 子命令"
+else
+    bad "T25 codegraph 提示入口不执行任何 CodeGraph 子命令"
+fi
+: > "$codegraph_hint_log"
+show_out="$(env PATH="$setup_shim_dir:$PATH" CODEGRAPH_LOG="$codegraph_hint_log" \
+    bash -c 'source "$1"; show_components' _ "$SUT")"
+case "$show_out" in
+    *'codegraph: codegraph test'*) ok "T25 show_components 显示 CodeGraph 版本" ;;
+    *) bad "T25 show_components 显示 CodeGraph 版本" ;;
+esac
+empty_path_dir="$WORK_DIR/empty-path"
+mkdir -p "$empty_path_dir"
+uninstalled_out="$(env PATH="$empty_path_dir" /bin/bash -c 'source "$1"; show_components' _ "$SUT")"
+case "$uninstalled_out" in
+    *'codegraph: 未安装'*) ok "T25 show_components 显示 CodeGraph 未安装" ;;
+    *) bad "T25 show_components 显示 CodeGraph 未安装" ;;
+esac
 
 echo "== T26 bashrc 临时文件：Token 写入全过程保持 0600 =="
 chmod_shim_dir="$WORK_DIR/chmod-bin"
